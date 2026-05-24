@@ -224,8 +224,8 @@ fn icon_path() -> std::path::PathBuf {
         "stable" => "",
         "preview" => "-preview",
         "nightly" => "-nightly",
-        "dev" => "-dev",
-        _ => "-dev",
+        "dev" => "",
+        _ => "",
     };
 
     #[cfg(windows)]

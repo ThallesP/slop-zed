@@ -2986,6 +2986,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "url",
  "util",
  "walkdir",
  "windows 0.61.3",

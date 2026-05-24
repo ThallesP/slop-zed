@@ -28,6 +28,7 @@ use walkdir::WalkDir;
 use std::io::IsTerminal;
 
 const URL_PREFIX: [&'static str; 5] = ["zed://", "http://", "https://", "file://", "ssh://"];
+const ZED_SSH_REMOTE_URL_ENV_VAR_NAME: &str = "ZED_SSH_REMOTE_URL";
 
 struct Detect;
 
@@ -194,6 +195,22 @@ fn parse_path_with_position(argument_str: &str) -> anyhow::Result<String> {
     .map(|path_with_pos| path_with_pos.to_string(&|path| path.to_string_lossy().into_owned()))
 }
 
+fn ssh_url_for_path(remote_url: &str, path: &str) -> Result<String> {
+    let mut remote_url = url::Url::parse(remote_url).with_context(|| {
+        format!("parsing {ZED_SSH_REMOTE_URL_ENV_VAR_NAME} as an SSH remote URL")
+    })?;
+    anyhow::ensure!(
+        remote_url.scheme() == "ssh",
+        "{ZED_SSH_REMOTE_URL_ENV_VAR_NAME} must use the ssh:// scheme"
+    );
+    anyhow::ensure!(
+        remote_url.has_host(),
+        "{ZED_SSH_REMOTE_URL_ENV_VAR_NAME} must include a host"
+    );
+    remote_url.set_path(path);
+    Ok(remote_url.to_string())
+}
+
 fn expand_directory_diff_pairs(
     diff_pairs: Vec<[String; 2]>,
 ) -> anyhow::Result<(Vec<[String; 2]>, Vec<TempDir>)> {
@@ -356,6 +373,18 @@ mod tests {
         // Relative path
         let result = with_cwd(temp_tree.path(), || parse_path_with_position("file.txt")).unwrap();
         assert_path_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_ssh_url_for_path() {
+        let url = ssh_url_for_path("ssh://me@example.com:2222", "/home/me/project").unwrap();
+        assert_eq!(url, "ssh://me@example.com:2222/home/me/project");
+    }
+
+    #[test]
+    fn test_ssh_url_for_path_encodes_path() {
+        let url = ssh_url_for_path("ssh://example.com", "/home/me/my project").unwrap();
+        assert_eq!(url, "ssh://example.com/home/me/my%20project");
     }
 
     // NOTE:
@@ -633,6 +662,7 @@ fn run() -> Result<()> {
     let wsl = args.wsl.as_ref();
     #[cfg(not(target_os = "windows"))]
     let wsl = None;
+    let ssh_remote_url = env::var(ZED_SSH_REMOTE_URL_ENV_VAR_NAME).ok();
 
     for path in args.paths_with_position.iter() {
         if URL_PREFIX.iter().any(|&prefix| path.starts_with(prefix)) {
@@ -649,6 +679,9 @@ fn run() -> Result<()> {
             anonymous_fd_tmp_files.push((file, tmp_file));
         } else if let Some(wsl) = wsl {
             urls.push(format!("file://{}", parse_path_in_wsl(path, wsl)?));
+        } else if let Some(ssh_remote_url) = &ssh_remote_url {
+            let path = parse_path_with_position(path)?;
+            urls.push(ssh_url_for_path(ssh_remote_url, &path)?);
         } else {
             paths.push(parse_path_with_position(path)?);
         }

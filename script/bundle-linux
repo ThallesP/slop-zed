@@ -136,7 +136,7 @@ if ldd "${target_dir}/${remote_server_triple}/release/remote_server" | grep -q '
 fi
 
 suffix=""
-if [ "$channel" != "stable" ]; then
+if [[ "$channel" == "preview" || "$channel" == "nightly" ]]; then
   suffix="-$channel"
 fi
 
@@ -181,8 +181,8 @@ elif [[ "$channel" == "nightly" ]]; then
   export APP_NAME="Zed Nightly"
   APP_ID="dev.zed.Zed-Nightly"
 elif [[ "$channel" == "dev" ]]; then
-  export APP_NAME="Zed Devel"
-  APP_ID="dev.zed.Zed-Dev"
+  export APP_NAME="Zed"
+  APP_ID="dev.zed.Zed"
 else
   export APP_NAME="Zed"
   APP_ID="dev.zed.Zed"

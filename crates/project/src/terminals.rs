@@ -613,6 +613,10 @@ fn create_remote_shell(
     remote_client: Entity<RemoteClient>,
     cx: &mut App,
 ) -> Result<(Shell, HashMap<String, String>)> {
+    let connection_options = remote_client.read(cx).connection_options();
+    if let Some(remote_url) = ssh_remote_url(&connection_options)? {
+        env.insert("ZED_SSH_REMOTE_URL".to_string(), remote_url);
+    }
     insert_zed_terminal_env(&mut env, &release_channel::AppVersion::global(cx));
 
     let (program, args) = match spawn_command {
@@ -629,7 +633,7 @@ fn create_remote_shell(
     )?;
 
     log::debug!("Connecting to a remote server: {:?}", command.program);
-    let host = remote_client.read(cx).connection_options().display_name();
+    let host = connection_options.display_name();
 
     Ok((
         Shell::WithArguments {
@@ -639,6 +643,24 @@ fn create_remote_shell(
         },
         command.env,
     ))
+}
+
+fn ssh_remote_url(connection_options: &remote::RemoteConnectionOptions) -> Result<Option<String>> {
+    let remote::RemoteConnectionOptions::Ssh(options) = connection_options else {
+        return Ok(None);
+    };
+
+    let host = options.host.to_bracketed_string();
+    let mut url = url::Url::parse(&format!("ssh://{host}"))?;
+    if let Some(username) = &options.username {
+        url.set_username(username)
+            .map_err(|_| anyhow::anyhow!("failed to set SSH username"))?;
+    }
+    if let Some(port) = options.port {
+        url.set_port(Some(port))
+            .map_err(|_| anyhow::anyhow!("failed to set SSH port"))?;
+    }
+    Ok(Some(url.to_string()))
 }
 
 fn format_task_for_activation(
