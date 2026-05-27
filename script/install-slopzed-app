@@ -123,6 +123,8 @@ sign_binary_if_needed() {
 
 mkdir -p "\${log_dir}"
 
+export SLOPZED_FORCE_RESTORE_LAST_SESSION=1
+
 {
   printf '\\n[%s] Launching ${app_name} from %s\\n' "\$(date '+%Y-%m-%d %H:%M:%S')" "\${repo_dir}"
   cd "\${repo_dir}" || exit 1

@@ -1654,6 +1654,13 @@ pub(crate) async fn restorable_workspace_locations(
         )
     });
 
+    // The SlopZed launcher sets this env var so the app always reopens the
+    // previous session (including remote SSH workspaces) regardless of the
+    // user's restore_on_startup setting.
+    if std::env::var_os("SLOPZED_FORCE_RESTORE_LAST_SESSION").is_some() {
+        restore_behavior = workspace::RestoreOnStartupBehavior::LastSession;
+    }
+
     let session_handle = app_state.session.clone();
     let (last_session_id, last_session_window_stack) = cx.update(|cx| {
         let session = session_handle.read(cx);
