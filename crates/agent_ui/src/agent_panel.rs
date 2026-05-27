@@ -5121,6 +5121,38 @@ impl AgentPanel {
                                     }
                                 }),
                         )
+                        .item(
+                            ContextMenuEntry::new("Codex")
+                                .when(
+                                    !showing_terminal && is_agent_selected(Agent::Codex),
+                                    |this| this.action(Box::new(NewThread)),
+                                )
+                                .icon(IconName::AiOpenAi)
+                                .icon_color(Color::Muted)
+                                .disabled(is_via_collab)
+                                .handler({
+                                    let workspace = workspace.clone();
+                                    move |window, cx| {
+                                        if let Some(workspace) = workspace.upgrade() {
+                                            workspace.update(cx, |workspace, cx| {
+                                                if let Some(panel) =
+                                                    workspace.panel::<AgentPanel>(cx)
+                                                {
+                                                    panel.update(cx, |panel, cx| {
+                                                        panel.selected_agent = Agent::Codex;
+                                                        panel.activate_new_thread(
+                                                            true,
+                                                            AgentThreadSource::AgentPanel,
+                                                            window,
+                                                            cx,
+                                                        );
+                                                    });
+                                                }
+                                            });
+                                        }
+                                    }
+                                }),
+                        )
                         .when(supports_terminal, |menu| {
                             menu.item(
                                 ContextMenuEntry::new("Terminal")

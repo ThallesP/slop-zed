@@ -413,6 +413,11 @@ impl Domain for TerminalDb {
         sql! (
             ALTER TABLE terminals ADD COLUMN custom_title TEXT;
         ),
+        sql! (
+            ALTER TABLE terminals ADD COLUMN remote_session_id TEXT;
+            ALTER TABLE terminals ADD COLUMN profile_id TEXT;
+            ALTER TABLE terminals ADD COLUMN is_remote_persistent INTEGER DEFAULT 0;
+        ),
     ];
 }
 
@@ -504,4 +509,53 @@ impl TerminalDb {
             WHERE item_id = ? AND workspace_id = ?
         }
     }
+
+    pub async fn save_remote_session(
+        &self,
+        item_id: ItemId,
+        workspace_id: WorkspaceId,
+        remote_session_id: Option<String>,
+        profile_id: Option<String>,
+        is_remote_persistent: bool,
+    ) -> Result<()> {
+        self.write(move |conn| {
+            let query = "INSERT INTO terminals (item_id, workspace_id, remote_session_id, profile_id, is_remote_persistent)
+                VALUES (?1, ?2, ?3, ?4, ?5)
+                ON CONFLICT (workspace_id, item_id) DO UPDATE SET
+                    remote_session_id = excluded.remote_session_id,
+                    profile_id = excluded.profile_id,
+                    is_remote_persistent = excluded.is_remote_persistent";
+            let mut statement = Statement::prepare(conn, query)?;
+            let mut next_index = statement.bind(&item_id, 1)?;
+            next_index = statement.bind(&workspace_id, next_index)?;
+            next_index = statement.bind(&remote_session_id, next_index)?;
+            next_index = statement.bind(&profile_id, next_index)?;
+            statement.bind(&(is_remote_persistent as i64), next_index)?;
+            statement.exec()
+        })
+        .await
+    }
+
+    pub fn get_remote_session(
+        &self,
+        item_id: ItemId,
+        workspace_id: WorkspaceId,
+    ) -> Result<Option<SerializedRemoteTerminalSession>> {
+        let row = self.select_row_bound::<(ItemId, WorkspaceId), (Option<String>, i64)>(sql! {
+            SELECT profile_id, is_remote_persistent
+            FROM terminals
+            WHERE item_id = ? AND workspace_id = ?
+        })?((item_id, workspace_id))?;
+
+        Ok(row.map(|(profile_id, is_remote_persistent)| SerializedRemoteTerminalSession {
+            profile_id,
+            is_remote_persistent: is_remote_persistent != 0,
+        }))
+    }
+}
+
+#[derive(Debug)]
+pub struct SerializedRemoteTerminalSession {
+    pub profile_id: Option<String>,
+    pub is_remote_persistent: bool,
 }

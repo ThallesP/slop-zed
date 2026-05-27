@@ -300,6 +300,12 @@ impl RemoteConnection for SshRemoteConnection {
         self.ssh_default_system_shell.clone()
     }
 
+    fn remote_server_binary_path(&self) -> Option<String> {
+        self.remote_binary_path
+            .as_ref()
+            .map(|path| path.display(self.path_style()).into_owned())
+    }
+
     fn build_command(
         &self,
         input_program: Option<String>,
@@ -846,15 +852,9 @@ impl SshRemoteConnection {
         }
 
         let wanted_version = cx.update(|cx| match release_channel {
-            ReleaseChannel::Nightly => Ok(None),
-            ReleaseChannel::Dev => {
-                anyhow::bail!(
-                    "ZED_BUILD_REMOTE_SERVER is not set and no remote server exists at ({:?})",
-                    dst_path
-                )
-            }
-            _ => Ok(Some(AppVersion::global(cx))),
-        })?;
+            ReleaseChannel::Nightly | ReleaseChannel::Dev => None,
+            _ => Some(AppVersion::global(cx)),
+        });
 
         let tmp_path_compressed = remote_server_dir_relative().join(
             RelPath::unix(&format!(

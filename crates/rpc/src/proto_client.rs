@@ -265,6 +265,38 @@ impl AnyProtoClient {
         self.0.client.send(envelope, T::NAME)
     }
 
+    pub fn add_message_handler<M, E, H, F>(&self, entity: gpui::WeakEntity<E>, handler: H)
+    where
+        M: EnvelopedMessage,
+        E: 'static,
+        H: 'static + Sync + Fn(Entity<E>, TypedEnvelope<M>, AsyncApp) -> F + Send + Sync,
+        F: 'static + Future<Output = Result<()>>,
+    {
+        self.0
+            .client
+            .message_handler_set()
+            .lock()
+            .add_message_handler(
+                TypeId::of::<M>(),
+                entity.into(),
+                Arc::new(move |entity, envelope, _, cx| {
+                    let Ok(entity) = entity.downcast::<E>() else {
+                        return async move {
+                            Err(anyhow::anyhow!("received message for wrong entity type"))
+                        }
+                        .boxed_local();
+                    };
+                    let Ok(envelope) = envelope.into_any().downcast::<TypedEnvelope<M>>() else {
+                        return async move {
+                            Err(anyhow::anyhow!("received message with wrong payload type"))
+                        }
+                        .boxed_local();
+                    };
+                    handler(entity, *envelope, cx).boxed_local()
+                }),
+            )
+    }
+
     pub fn request_lsp<T>(
         &self,
         project_id: u64,

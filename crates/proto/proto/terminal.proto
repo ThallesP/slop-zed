@@ -1,0 +1,83 @@
+syntax = "proto3";
+package zed.messages;
+
+message TerminalSessionId {
+  string id = 1;
+}
+
+message TerminalSize {
+  uint32 rows = 1;
+  uint32 columns = 2;
+  uint32 cell_width = 3;
+  uint32 cell_height = 4;
+}
+
+message CreateTerminalSession {
+  uint64 project_id = 1;
+  string profile_id = 2;
+  string label = 3;
+  optional string cwd = 4;
+  optional string program = 5;
+  repeated string args = 6;
+  map<string, string> env = 7;
+  TerminalSize initial_size = 8;
+  bool persistent = 9;
+}
+
+message CreateTerminalSessionResponse {
+  TerminalSessionId session_id = 1;
+}
+
+message AttachTerminalSession {
+  uint64 project_id = 1;
+  TerminalSessionId session_id = 2;
+  uint64 attach_id = 3;
+  TerminalSize size = 4;
+}
+
+message TerminalOutput {
+  TerminalSessionId session_id = 1;
+  uint64 attach_id = 2;
+  uint64 sequence = 3;
+  bytes data = 4;
+  bool replay = 5;
+}
+
+message TerminalInput {
+  TerminalSessionId session_id = 1;
+  bytes data = 2;
+}
+
+message ResizeTerminalSession {
+  TerminalSessionId session_id = 1;
+  TerminalSize size = 2;
+}
+
+message CloseTerminalSession {
+  TerminalSessionId session_id = 1;
+}
+
+message ListTerminalSessions {
+  uint64 project_id = 1;
+}
+
+message ListTerminalSessionsResponse {
+  repeated TerminalSessionInfo sessions = 1;
+}
+
+message TerminalSessionInfo {
+  TerminalSessionId session_id = 1;
+  string profile_id = 2;
+  string label = 3;
+  optional string cwd = 4;
+  bool persistent = 5;
+  bool exited = 6;
+  optional int32 exit_code = 7;
+  optional int32 signal = 8;
+}
+
+message TerminalSessionExited {
+  TerminalSessionId session_id = 1;
+  optional int32 exit_code = 2;
+  optional int32 signal = 3;
+}

@@ -1,3 +1,4 @@
+mod codex_agent_server;
 mod db;
 mod legacy_thread;
 mod native_agent_server;
@@ -12,6 +13,7 @@ mod tool_permissions;
 mod tools;
 mod user_agents_md;
 
+pub use codex_agent_server::{CODEX_AGENT_ID, CodexAgentServer};
 use context_server::ContextServerId;
 pub use db::*;
 use itertools::Itertools;

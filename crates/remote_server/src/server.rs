@@ -1,4 +1,5 @@
 mod headless_project;
+mod terminal_sessions;
 
 #[cfg(test)]
 mod remote_editing_tests;
@@ -37,7 +38,7 @@ use remote::{
     proxy::ProxyLaunchError,
 };
 use reqwest_client::ReqwestClient;
-use rpc::proto::{self, Envelope, REMOTE_SERVER_PROJECT_ID};
+use rpc::proto::{self, Envelope, EnvelopedMessage, REMOTE_SERVER_PROJECT_ID};
 use rpc::{AnyProtoClient, TypedEnvelope};
 use settings::{Settings, SettingsStore, watch_config_file};
 use smol::{
@@ -80,6 +81,11 @@ pub enum Commands {
         #[arg(long)]
         identifier: String,
     },
+    Open {
+        #[arg(long)]
+        identifier: String,
+        paths: Vec<PathBuf>,
+    },
     Version,
 }
 
@@ -105,6 +111,9 @@ pub fn run(command: Commands) -> anyhow::Result<()> {
             identifier,
             reconnect,
         } => execute_proxy(identifier, reconnect).context("running proxy on the remote server"),
+        Commands::Open { identifier, paths } => {
+            execute_open(identifier, paths).context("sending open paths request")
+        }
         Commands::Version => {
             let release_channel = *RELEASE_CHANNEL;
             match release_channel {
@@ -125,6 +134,41 @@ pub fn run(command: Commands) -> anyhow::Result<()> {
             Ok(())
         }
     }
+}
+
+fn execute_open(identifier: String, paths: Vec<PathBuf>) -> anyhow::Result<()> {
+    let server_paths = ServerPaths::new(&identifier)?;
+    let current_directory = env::current_dir().context("retrieving current directory")?;
+    let paths = if paths.is_empty() {
+        vec![current_directory.clone()]
+    } else {
+        paths
+    };
+    let paths = paths
+        .into_iter()
+        .map(|path| {
+            if path.is_absolute() {
+                path
+            } else {
+                current_directory.join(path)
+            }
+        })
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect();
+    let envelope = proto::RemoteOpenPaths { paths }.into_envelope(0, None, None);
+
+    smol::block_on(async move {
+        let mut stream = UnixStream::connect(&server_paths.stdin_socket)
+            .await
+            .with_context(|| {
+                format!(
+                    "connecting to remote server stdin socket {}",
+                    server_paths.stdin_socket.display()
+                )
+            })?;
+        let mut buffer = Vec::new();
+        write_message(&mut stream, &mut buffer, envelope).await
+    })
 }
 
 pub static VERSION: LazyLock<String> = LazyLock::new(|| match *RELEASE_CHANNEL {
@@ -786,23 +830,25 @@ pub(crate) fn execute_proxy(
         } else {
             if let Some(pid) = server_pid {
                 log::info!(
-                    "proxy found server already running with PID {}. Killing process and cleaning up files...",
+                    "proxy found server already running with PID {}. Reusing it for persistent remote state...",
                     pid
                 );
-                kill_running_server(pid, &server_paths)?;
-            }
-            gpui::block_on(spawn_server(&server_paths)).map_err(ExecuteProxyError::SpawnServer)?;
-            std::fs::read_to_string(&server_paths.pid_file)
-                .and_then(|contents| {
-                    contents.parse::<u32>().map_err(|_| {
-                        std::io::Error::new(
-                            std::io::ErrorKind::InvalidData,
-                            "Invalid PID file contents",
-                        )
+                pid
+            } else {
+                gpui::block_on(spawn_server(&server_paths))
+                    .map_err(ExecuteProxyError::SpawnServer)?;
+                std::fs::read_to_string(&server_paths.pid_file)
+                    .and_then(|contents| {
+                        contents.parse::<u32>().map_err(|_| {
+                            std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                "Invalid PID file contents",
+                            )
+                        })
                     })
-                })
-                .map_err(SpawnServerError::ProcessStatus)
-                .map_err(ExecuteProxyError::SpawnServer)?
+                    .map_err(SpawnServerError::ProcessStatus)
+                    .map_err(ExecuteProxyError::SpawnServer)?
+            }
         }
     };
 

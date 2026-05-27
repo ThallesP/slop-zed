@@ -164,19 +164,46 @@ impl TerminalPanel {
                             .with_handle(pane.new_item_context_menu_handle.clone())
                             .menu(move |window, cx| {
                                 let focus_handle = focus_handle.clone();
-                                let menu = ContextMenu::build(window, cx, |menu, _, _| {
-                                    menu.context(focus_handle.clone())
-                                        .action(
-                                            "New Terminal",
-                                            workspace::NewTerminal::default().boxed_clone(),
-                                        )
-                                        // We want the focus to go back to terminal panel once task modal is dismissed,
-                                        // hence we focus that first. Otherwise, we'd end up without a focused element, as
-                                        // context menu will be gone the moment we spawn the modal.
-                                        .action(
-                                            "Spawn Task",
-                                            zed_actions::Spawn::modal().boxed_clone(),
-                                        )
+                                let menu = ContextMenu::build(window, cx, |menu, _, cx| {
+                                    let mut menu = menu.context(focus_handle.clone()).action(
+                                        "New Terminal",
+                                        workspace::NewTerminal::default().boxed_clone(),
+                                    );
+
+                                    let settings = TerminalSettings::get_global(cx);
+                                    let default_profile = settings.default_profile.clone();
+                                    let mut profiles = settings
+                                        .profiles
+                                        .iter()
+                                        .map(|(id, profile)| {
+                                            (
+                                                id.clone(),
+                                                profile.label.clone().unwrap_or_else(|| id.clone()),
+                                            )
+                                        })
+                                        .collect::<Vec<_>>();
+                                    profiles.sort_by(|(_, left), (_, right)| left.cmp(right));
+                                    for (profile_id, label) in profiles {
+                                        if profile_id == default_profile {
+                                            continue;
+                                        }
+                                        menu = menu.action(
+                                            label,
+                                            workspace::NewTerminal {
+                                                local: false,
+                                                profile_id: Some(profile_id),
+                                            }
+                                            .boxed_clone(),
+                                        );
+                                    }
+
+                                    // We want the focus to go back to terminal panel once task modal is dismissed,
+                                    // hence we focus that first. Otherwise, we'd end up without a focused element, as
+                                    // context menu will be gone the moment we spawn the modal.
+                                    menu.action(
+                                        "Spawn Task",
+                                        zed_actions::Spawn::modal().boxed_clone(),
+                                    )
                                 });
 
                                 Some(menu)
@@ -531,6 +558,18 @@ impl TerminalPanel {
             .update(cx, |panel, cx| {
                 if action.local {
                     panel.add_local_terminal_shell(RevealStrategy::Always, window, cx)
+                } else if let Some((profile_id, label, persistent)) =
+                    terminal_profile_to_spawn(action.profile_id.as_deref(), cx)
+                {
+                    panel.add_terminal_profile(
+                        profile_id,
+                        label,
+                        Some(action.working_directory.clone()),
+                        persistent,
+                        RevealStrategy::Always,
+                        window,
+                        cx,
+                    )
                 } else {
                     panel.add_terminal_shell(
                         Some(action.working_directory.clone()),
@@ -663,9 +702,18 @@ impl TerminalPanel {
         if center_pane_has_focus && active_center_item_is_terminal {
             let working_directory = default_working_directory(workspace, cx);
             let local = action.local;
+            let profile = terminal_profile_to_spawn(action.profile_id.as_deref(), cx);
             Self::add_center_terminal(workspace, window, cx, move |project, cx| {
                 if local {
                     project.create_local_terminal(cx)
+                } else if let Some((profile_id, label, persistent)) = profile {
+                    project.create_terminal_from_profile(
+                        profile_id,
+                        label,
+                        working_directory,
+                        persistent,
+                        cx,
+                    )
                 } else {
                     project.create_terminal_shell(working_directory, cx)
                 }
@@ -682,6 +730,18 @@ impl TerminalPanel {
             .update(cx, |this, cx| {
                 if action.local {
                     this.add_local_terminal_shell(RevealStrategy::Always, window, cx)
+                } else if let Some((profile_id, label, persistent)) =
+                    terminal_profile_to_spawn(action.profile_id.as_deref(), cx)
+                {
+                    this.add_terminal_profile(
+                        profile_id,
+                        label,
+                        default_working_directory(workspace, cx),
+                        persistent,
+                        RevealStrategy::Always,
+                        window,
+                        cx,
+                    )
                 } else {
                     this.add_terminal_shell(
                         default_working_directory(workspace, cx),
@@ -860,6 +920,71 @@ impl TerminalPanel {
         cx: &mut Context<Self>,
     ) -> Task<Result<WeakEntity<Terminal>>> {
         self.add_terminal_shell_internal(true, None, reveal_strategy, window, cx)
+    }
+
+    fn add_terminal_profile(
+        &mut self,
+        profile_id: String,
+        label: String,
+        cwd: Option<PathBuf>,
+        persistent: bool,
+        reveal_strategy: RevealStrategy,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<WeakEntity<Terminal>>> {
+        let workspace = self.workspace.clone();
+
+        cx.spawn_in(window, async move |terminal_panel, cx| {
+            if workspace.update(cx, |workspace, cx| !is_enabled_in_workspace(workspace, cx))? {
+                anyhow::bail!("terminal not yet supported for collaborative projects");
+            }
+            let pane = terminal_panel.update(cx, |terminal_panel, _| {
+                terminal_panel.pending_terminals_to_add += 1;
+                terminal_panel.active_pane.clone()
+            })?;
+            let project = workspace.read_with(cx, |workspace, _| workspace.project().clone())?;
+            let terminal = project
+                .update(cx, |project, cx| {
+                    project.create_terminal_from_profile(profile_id, label, cwd, persistent, cx)
+                })
+                .await?;
+
+            let result = workspace.update_in(cx, |workspace, window, cx| {
+                let terminal_view = Box::new(cx.new(|cx| {
+                    TerminalView::new(
+                        terminal.clone(),
+                        workspace.weak_handle(),
+                        workspace.database_id(),
+                        workspace.project().downgrade(),
+                        window,
+                        cx,
+                    )
+                }));
+
+                match reveal_strategy {
+                    RevealStrategy::Always => {
+                        workspace.focus_panel::<Self>(window, cx);
+                    }
+                    RevealStrategy::NoFocus => {
+                        workspace.open_panel::<Self>(window, cx);
+                    }
+                    RevealStrategy::Never => {}
+                }
+
+                pane.update(cx, |pane, cx| {
+                    let focus = matches!(reveal_strategy, RevealStrategy::Always);
+                    pane.add_item(terminal_view, true, focus, None, window, cx);
+                });
+
+                Ok(terminal.downgrade())
+            })?;
+            terminal_panel.update(cx, |terminal_panel, cx| {
+                terminal_panel.pending_terminals_to_add =
+                    terminal_panel.pending_terminals_to_add.saturating_sub(1);
+                terminal_panel.serialize(cx)
+            })?;
+            result
+        })
     }
 
     fn add_terminal_shell_internal(
@@ -1196,6 +1321,21 @@ pub fn prepare_task_for_spawn(
 
 fn is_enabled_in_workspace(workspace: &Workspace, cx: &App) -> bool {
     workspace.project().read(cx).supports_terminal(cx)
+}
+
+fn terminal_profile_to_spawn(profile_id: Option<&str>, cx: &App) -> Option<(String, String, bool)> {
+    let settings = TerminalSettings::get_global(cx);
+    let profile_id = profile_id.unwrap_or(&settings.default_profile);
+    let profile = settings.profiles.get(profile_id)?;
+    let label = profile
+        .label
+        .clone()
+        .unwrap_or_else(|| profile_id.to_string());
+    Some((
+        profile_id.to_string(),
+        label,
+        profile.persistent && settings.persistent_sessions.remote,
+    ))
 }
 
 pub fn new_terminal_pane(
@@ -2226,7 +2366,10 @@ mod tests {
                 multi_workspace.workspace().update(cx, |workspace, cx| {
                     TerminalPanel::new_terminal(
                         workspace,
-                        &workspace::NewTerminal { local: true },
+                        &workspace::NewTerminal {
+                            local: true,
+                            profile_id: None,
+                        },
                         window,
                         cx,
                     );

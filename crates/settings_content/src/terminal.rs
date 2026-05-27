@@ -183,6 +183,53 @@ pub struct TerminalSettingsContent {
     ///
     /// Default: "system"
     pub bell: Option<TerminalBell>,
+    /// Controls persistent terminal sessions.
+    ///
+    /// Default: { "remote": false, "scrollback_bytes": 10485760 }
+    pub persistent_sessions: Option<TerminalPersistentSessionsContent>,
+    /// The terminal profile used by default terminal actions.
+    ///
+    /// Default: "shell"
+    pub default_profile: Option<String>,
+    /// Named terminal profiles exposed from the terminal new menu.
+    ///
+    /// Default: {}
+    pub profiles: Option<HashMap<String, TerminalProfileContent>>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq, JsonSchema, MergeFrom)]
+pub struct TerminalPersistentSessionsContent {
+    /// Whether remote SSH terminal profiles should keep running on the remote server.
+    ///
+    /// Default: false
+    pub remote: Option<bool>,
+    /// Number of raw output bytes retained for replay on reattach.
+    ///
+    /// Default: 10485760
+    pub scrollback_bytes: Option<usize>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq, JsonSchema, MergeFrom)]
+pub struct TerminalProfileContent {
+    /// Human readable name shown in terminal profile menus.
+    pub label: Option<String>,
+    /// Shell override for terminals created with this profile.
+    pub shell: Option<Shell>,
+    /// Working directory override for terminals created with this profile.
+    pub cwd: Option<String>,
+    /// Environment overrides for terminals created with this profile.
+    pub env: Option<HashMap<String, String>>,
+    /// Whether this profile should use remote persistent sessions.
+    pub persistent: Option<bool>,
+    /// Optional debug integration for terminals created with this profile.
+    pub debug: Option<TerminalProfileDebugContent>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq, JsonSchema, MergeFrom)]
+pub struct TerminalProfileDebugContent {
+    pub adapter: Option<String>,
+    #[serde(rename = "type")]
+    pub debug_type: Option<String>,
 }
 
 /// Shell configuration to open the terminal with.

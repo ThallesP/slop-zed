@@ -204,19 +204,29 @@ async fn build_remote_server_from_source(
         }
     }
 
-    // By default, we make building remote server from source opt-out and we do not force artifact compression
-    // for quicker builds.
-    let build_remote_server =
-        std::env::var("ZED_BUILD_REMOTE_SERVER").unwrap_or("nocompress".into());
-
-    if let "never" = &*build_remote_server {
-        return Ok(None);
-    } else if let "false" | "no" | "off" | "0" = &*build_remote_server {
-        if binary_exists_on_server {
+    let build_remote_server = match std::env::var("ZED_BUILD_REMOTE_SERVER") {
+        Ok(value) if matches!(&*value, "never" | "false" | "no" | "off" | "0") => {
+            if !binary_exists_on_server {
+                log::info!(
+                    "ZED_BUILD_REMOTE_SERVER is disabled; using prebuilt remote server binary"
+                );
+            }
             return Ok(None);
         }
-        log::warn!("ZED_BUILD_REMOTE_SERVER is disabled, but no server binary exists on the server")
-    }
+        Ok(value) => value,
+        Err(VarError::NotPresent) => {
+            if !binary_exists_on_server {
+                log::info!(
+                    "ZED_BUILD_REMOTE_SERVER is not set; using prebuilt remote server binary"
+                );
+            }
+            return Ok(None);
+        }
+        Err(error) => {
+            log::error!("Failed to get env var `ZED_BUILD_REMOTE_SERVER` value: {error}");
+            return Ok(None);
+        }
+    };
 
     async fn run_cmd(command: &mut Command) -> Result<()> {
         let output = command

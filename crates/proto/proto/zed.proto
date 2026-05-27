@@ -14,6 +14,7 @@ import "image.proto";
 import "lsp.proto";
 import "notification.proto";
 import "task.proto";
+import "terminal.proto";
 import "toolchain.proto";
 import "worktree.proto";
 
@@ -484,7 +485,18 @@ message Envelope {
     SearchCommits search_commits = 449;
     SearchCommitsResponse search_commits_response = 450;
     GetInitialGraphData get_initial_graph_data = 451;
-    GetInitialGraphDataResponse get_initial_graph_data_response = 452; // current max
+    GetInitialGraphDataResponse get_initial_graph_data_response = 452;
+    RemoteOpenPaths remote_open_paths = 453;
+    CreateTerminalSession create_terminal_session = 454;
+    CreateTerminalSessionResponse create_terminal_session_response = 455;
+    AttachTerminalSession attach_terminal_session = 456;
+    TerminalOutput terminal_output = 457;
+    TerminalInput terminal_input = 458;
+    ResizeTerminalSession resize_terminal_session = 459;
+    CloseTerminalSession close_terminal_session = 460;
+    ListTerminalSessions list_terminal_sessions = 461;
+    ListTerminalSessionsResponse list_terminal_sessions_response = 462;
+    TerminalSessionExited terminal_session_exited = 463; // current max
   }
 
   reserved 87 to 88;

@@ -3366,6 +3366,7 @@ impl Pane {
                                                 OpenTerminal {
                                                     working_directory: parent_abs_path.clone(),
                                                     local: false,
+                                                    profile_id: None,
                                                 }
                                                 .boxed_clone(),
                                                 cx,

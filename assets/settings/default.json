@@ -1982,6 +1982,17 @@
     "show_count_badge": false,
     // Whether to invoke the OS-specific alert sound when the terminal bell (BEL character) is printed.
     "bell": "off",
+    // Controls persistent terminal sessions.
+    "persistent_sessions": {
+      // Whether SSH remote terminal profiles should keep running on the remote server.
+      "remote": false,
+      // Number of raw output bytes retained for replay when reattaching.
+      "scrollback_bytes": 10485760,
+    },
+    // The terminal profile used by default terminal actions.
+    "default_profile": "shell",
+    // Named terminal profiles exposed from the terminal new menu.
+    "profiles": {},
   },
   "code_actions_on_format": {},
   // Settings related to running tasks.

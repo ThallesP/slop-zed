@@ -5611,6 +5611,7 @@ impl Editor {
                 OpenTerminal {
                     working_directory,
                     local: false,
+                    profile_id: None,
                 }
                 .boxed_clone(),
                 cx,

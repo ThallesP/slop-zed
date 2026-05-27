@@ -1353,6 +1353,7 @@ impl Project {
                 git_diff_debouncer: DebouncedDelay::new(),
                 terminals: Terminals {
                     local_handles: Vec::new(),
+                    remote_session_handles: HashMap::default(),
                 },
                 node: Some(node),
                 search_history: Self::new_search_history(),
@@ -1596,6 +1597,7 @@ impl Project {
                 git_diff_debouncer: DebouncedDelay::new(),
                 terminals: Terminals {
                     local_handles: Vec::new(),
+                    remote_session_handles: HashMap::default(),
                 },
                 node: Some(node),
                 search_history: Self::new_search_history(),
@@ -1630,6 +1632,11 @@ impl Project {
             remote_proto.add_entity_message_handler(Self::handle_toast);
             remote_proto.add_entity_request_handler(Self::handle_language_server_prompt_request);
             remote_proto.add_entity_message_handler(Self::handle_hide_toast);
+            remote_proto.add_message_handler(cx.weak_entity(), Self::handle_terminal_output);
+            remote_proto.add_message_handler(
+                cx.weak_entity(),
+                Self::handle_terminal_session_exited,
+            );
             remote_proto.add_entity_request_handler(Self::handle_update_buffer_from_remote_server);
             remote_proto.add_entity_request_handler(Self::handle_trust_worktrees);
             remote_proto.add_entity_request_handler(Self::handle_restrict_worktrees);
@@ -1885,6 +1892,7 @@ impl Project {
                 git_diff_debouncer: DebouncedDelay::new(),
                 terminals: Terminals {
                     local_handles: Vec::new(),
+                    remote_session_handles: HashMap::default(),
                 },
                 node: None,
                 search_history: Self::new_search_history(),
@@ -5276,6 +5284,53 @@ impl Project {
             });
             Ok(())
         })
+    }
+
+    async fn handle_terminal_output(
+        this: Entity<Self>,
+        envelope: TypedEnvelope<proto::TerminalOutput>,
+        mut cx: AsyncApp,
+    ) -> Result<()> {
+        let payload = envelope.payload;
+        let Some(session_id) = payload.session_id.map(|session_id| session_id.id) else {
+            return Ok(());
+        };
+        this.update(&mut cx, |this, cx| {
+            let Some(terminal) = this
+                .terminals
+                .remote_session_handles
+                .get(&session_id)
+                .and_then(|terminal| terminal.upgrade())
+            else {
+                return;
+            };
+            terminal.update(cx, |terminal, cx| {
+                terminal.write_output(&payload.data, cx);
+            });
+        });
+        Ok(())
+    }
+
+    async fn handle_terminal_session_exited(
+        this: Entity<Self>,
+        envelope: TypedEnvelope<proto::TerminalSessionExited>,
+        mut cx: AsyncApp,
+    ) -> Result<()> {
+        let payload = envelope.payload;
+        let Some(session_id) = payload.session_id.map(|session_id| session_id.id) else {
+            return Ok(());
+        };
+        this.update(&mut cx, |this, cx| {
+            if let Some(terminal) = this
+                .terminals
+                .remote_session_handles
+                .get(&session_id)
+                .and_then(|terminal| terminal.upgrade())
+            {
+                terminal.update(cx, |_, cx| cx.notify());
+            }
+        });
+        Ok(())
     }
 
     async fn handle_language_server_prompt_request(

@@ -18,6 +18,10 @@ message OpenServerSettings {
   uint64 project_id = 1;
 }
 
+message RemoteOpenPaths {
+  repeated string paths = 1;
+}
+
 message GetCrashFiles {}
 
 message GetCrashFilesResponse {

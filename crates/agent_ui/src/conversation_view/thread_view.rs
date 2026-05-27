@@ -1735,8 +1735,9 @@ impl ThreadView {
         }
         let thread = self.thread.clone();
 
-        let Some(user_message_id) = thread.update(cx, |thread, _| {
-            thread.entries().get(entry_ix)?.user_message()?.id.clone()
+        let Some((user_message_id, has_checkpoint)) = thread.update(cx, |thread, _| {
+            let message = thread.entries().get(entry_ix)?.user_message()?;
+            Some((message.id.clone()?, message.checkpoint.is_some()))
         }) else {
             return;
         };
@@ -1747,7 +1748,8 @@ impl ThreadView {
             // If there are, we keep/accept them since we're not regenerating the prompt that created them.
             //
             // If editing the prompt that generated the edits, they are auto-rejected
-            // through the `rewind` function in the `acp_thread`.
+            // through the rewind path. When a checkpoint exists, we also restore the
+            // working tree so editing a prior message rolls files back to that point.
             let has_earlier_edits = thread.read_with(cx, |thread, _| {
                 thread
                     .entries()
@@ -1764,9 +1766,17 @@ impl ThreadView {
                 });
             }
 
-            thread
-                .update(cx, |thread, cx| thread.rewind(user_message_id, cx))
-                .await?;
+            if has_checkpoint {
+                thread
+                    .update(cx, |thread, cx| {
+                        thread.restore_checkpoint(user_message_id, cx)
+                    })
+                    .await?;
+            } else {
+                thread
+                    .update(cx, |thread, cx| thread.rewind(user_message_id, cx))
+                    .await?;
+            }
             this.update_in(cx, |thread, window, cx| {
                 cx.emit(AcpThreadViewEvent::Interacted);
                 thread.send_impl(message_editor, window, cx);
@@ -4897,6 +4907,9 @@ impl ThreadView {
                     .checkpoint
                     .as_ref()
                     .is_some_and(|checkpoint| checkpoint.show);
+                let hover_group = SharedString::from(format!("user-message-actions-{}", entry_ix));
+                let copy_button_id = SharedString::from(format!("copy-user-message-{}", entry_ix));
+                let user_message_text = message.content.to_markdown(cx).to_string();
 
                 let is_subagent = self.is_subagent();
                 let can_rewind = self.thread.read(cx).supports_truncate(cx);
@@ -4942,6 +4955,7 @@ impl ThreadView {
                     .child(
                         div()
                             .relative()
+                            .group(&hover_group)
                             .child(
                                 div()
                                     .py_3()
@@ -4973,6 +4987,17 @@ impl ThreadView {
                                     .text_xs()
                                     .child(editor.clone().into_any_element())
                             )
+                            .when(!editor_focus, |this| {
+                                this.child(
+                                    div().absolute().top_1().right_1().child(
+                                        self.create_message_copy_button(
+                                            copy_button_id.clone(),
+                                            user_message_text.clone(),
+                                            hover_group.clone(),
+                                        ),
+                                    ),
+                                )
+                            })
                             .when(editor_focus, |this| {
                                 let base_container = h_flex()
                                     .absolute()
@@ -5061,6 +5086,12 @@ impl ThreadView {
             }) => {
                 let mut is_blank = true;
                 let is_last = entry_ix + 1 == total_entries;
+                let hover_group =
+                    SharedString::from(format!("assistant-message-actions-{}", entry_ix));
+                let copy_button_id =
+                    SharedString::from(format!("copy-assistant-message-{}", entry_ix));
+                let copyable_text =
+                    Self::get_agent_message_content(self.thread.read(cx).entries(), entry_ix, cx);
 
                 let style = MarkdownStyle::themed(MarkdownFont::Agent, window, cx);
                 let message_body = v_flex()
@@ -5114,7 +5145,21 @@ impl ThreadView {
                         .when(is_last, |this| this.pb_4())
                         .w_full()
                         .text_ui(cx)
-                        .child(self.render_message_context_menu(entry_ix, message_body, cx))
+                        .child(
+                            div()
+                                .relative()
+                                .group(&hover_group)
+                                .child(self.render_message_context_menu(entry_ix, message_body, cx))
+                                .when_some(copyable_text, |this, text| {
+                                    this.child(div().absolute().top_1().right_1().child(
+                                        self.create_message_copy_button(
+                                            copy_button_id.clone(),
+                                            text,
+                                            hover_group.clone(),
+                                        ),
+                                    ))
+                                }),
+                        )
                         .when_some(
                             self.entry_view_state
                                 .read(cx)
@@ -9056,6 +9101,18 @@ impl ThreadView {
         let message = message.into();
 
         CopyButton::new("copy-error-message", message).tooltip_label("Copy Error Message")
+    }
+
+    fn create_message_copy_button(
+        &self,
+        button_id: impl Into<ElementId>,
+        message: impl Into<SharedString>,
+        hover_group: SharedString,
+    ) -> impl IntoElement {
+        CopyButton::new(button_id, message)
+            .icon_size(IconSize::XSmall)
+            .tooltip_label("Copy Message")
+            .visible_on_hover(hover_group)
     }
 
     fn dismiss_error_button(&self, cx: &mut Context<Self>) -> impl IntoElement {

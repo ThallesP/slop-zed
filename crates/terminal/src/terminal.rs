@@ -350,6 +350,12 @@ pub struct TerminalBuilder {
     events_rx: UnboundedReceiver<AlacTermEvent>,
 }
 
+#[derive(Clone, Debug)]
+pub enum ExternalPtyCommand {
+    Input(Vec<u8>),
+    Resize(TerminalBounds),
+}
+
 impl TerminalBuilder {
     pub fn new_display_only(
         cursor_shape: CursorShape,
@@ -409,6 +415,9 @@ impl TerminalBuilder {
             #[cfg(windows)]
             shell_program: None,
             activation_script: Vec::new(),
+            remote_session_id: None,
+            terminal_profile_id: None,
+            remote_persistent: false,
             template: CopyTemplate {
                 shell: Shell::System,
                 env: HashMap::default(),
@@ -417,6 +426,101 @@ impl TerminalBuilder {
                 max_scroll_history_lines,
                 path_hyperlink_regexes: Vec::default(),
                 path_hyperlink_timeout_ms: 0,
+                window_id,
+            },
+            child_exited: None,
+            keyboard_input_sent: false,
+            event_loop_task: Task::ready(Ok(())),
+            background_executor: background_executor.clone(),
+            path_style,
+            #[cfg(any(test, feature = "test-support"))]
+            input_log: Vec::new(),
+        };
+
+        Ok(TerminalBuilder {
+            terminal,
+            events_rx,
+        })
+    }
+
+    pub fn new_external_pty(
+        cursor_shape: CursorShape,
+        alternate_scroll: AlternateScroll,
+        max_scroll_history_lines: Option<usize>,
+        path_hyperlink_regexes: Vec<String>,
+        path_hyperlink_timeout_ms: u64,
+        window_id: u64,
+        command_tx: UnboundedSender<ExternalPtyCommand>,
+        background_executor: &BackgroundExecutor,
+        path_style: PathStyle,
+        title_override: Option<String>,
+        remote_session_id: Option<String>,
+        terminal_profile_id: Option<String>,
+        remote_persistent: bool,
+    ) -> Result<TerminalBuilder> {
+        let default_cursor_style = AlacCursorStyle::from(cursor_shape);
+        let scrolling_history = max_scroll_history_lines
+            .unwrap_or(DEFAULT_SCROLL_HISTORY_LINES)
+            .min(MAX_SCROLL_HISTORY_LINES);
+        let config = Config {
+            scrolling_history,
+            default_cursor_style,
+            ..Config::default()
+        };
+
+        let (events_tx, events_rx) = unbounded();
+        let mut term = Term::new(
+            config.clone(),
+            &TerminalBounds::default(),
+            ZedListener(events_tx),
+        );
+
+        if let AlternateScroll::Off = alternate_scroll {
+            term.unset_private_mode(PrivateMode::Named(NamedPrivateMode::AlternateScroll));
+        }
+
+        let term = Arc::new(FairMutex::new(term));
+
+        let terminal = Terminal {
+            task: None,
+            terminal_type: TerminalType::ExternalPty { command_tx },
+            completion_tx: None,
+            term,
+            term_config: config,
+            title_override,
+            events: VecDeque::with_capacity(10),
+            last_content: Default::default(),
+            last_mouse: None,
+            matches: Vec::new(),
+
+            selection_head: None,
+            breadcrumb_text: String::new(),
+            scroll_px: px(0.),
+            next_link_id: 0,
+            selection_phase: SelectionPhase::Ended,
+            hyperlink_regex_searches: RegexSearches::new(
+                &path_hyperlink_regexes,
+                path_hyperlink_timeout_ms,
+            ),
+            vi_mode_enabled: false,
+            is_remote_terminal: true,
+            last_mouse_move_time: Instant::now(),
+            last_hyperlink_search_position: None,
+            mouse_down_hyperlink: None,
+            #[cfg(windows)]
+            shell_program: None,
+            activation_script: Vec::new(),
+            remote_session_id,
+            terminal_profile_id,
+            remote_persistent,
+            template: CopyTemplate {
+                shell: Shell::System,
+                env: HashMap::default(),
+                cursor_shape,
+                alternate_scroll,
+                max_scroll_history_lines,
+                path_hyperlink_regexes,
+                path_hyperlink_timeout_ms,
                 window_id,
             },
             child_exited: None,
@@ -643,6 +747,9 @@ impl TerminalBuilder {
                 #[cfg(windows)]
                 shell_program,
                 activation_script: activation_script.clone(),
+                remote_session_id: None,
+                terminal_profile_id: None,
+                remote_persistent: false,
                 template: CopyTemplate {
                     shell,
                     env,
@@ -849,6 +956,9 @@ enum TerminalType {
         pty_tx: Notifier,
         info: Arc<PtyProcessInfo>,
     },
+    ExternalPty {
+        command_tx: UnboundedSender<ExternalPtyCommand>,
+    },
     DisplayOnly,
 }
 
@@ -880,6 +990,9 @@ pub struct Terminal {
     shell_program: Option<String>,
     template: CopyTemplate,
     activation_script: Vec<String>,
+    remote_session_id: Option<String>,
+    terminal_profile_id: Option<String>,
+    remote_persistent: bool,
     child_exited: Option<ExitStatus>,
     keyboard_input_sent: bool,
     event_loop_task: Task<Result<(), anyhow::Error>>,
@@ -1035,8 +1148,16 @@ impl Terminal {
 
                 self.last_content.terminal_bounds = new_bounds;
 
-                if let TerminalType::Pty { pty_tx, .. } = &self.terminal_type {
-                    pty_tx.0.send(Msg::Resize(new_bounds.into())).ok();
+                match &self.terminal_type {
+                    TerminalType::Pty { pty_tx, .. } => {
+                        pty_tx.0.send(Msg::Resize(new_bounds.into())).ok();
+                    }
+                    TerminalType::ExternalPty { command_tx } => {
+                        command_tx
+                            .unbounded_send(ExternalPtyCommand::Resize(new_bounds))
+                            .ok();
+                    }
+                    TerminalType::DisplayOnly => {}
                 }
 
                 term.resize(new_bounds);
@@ -1469,16 +1590,22 @@ impl Terminal {
     /// Write the Input payload to the PTY, if applicable.
     /// (This is a no-op for display-only terminals.)
     fn write_to_pty(&self, input: impl Into<Cow<'static, [u8]>>) {
-        if let TerminalType::Pty { pty_tx, .. } = &self.terminal_type {
-            let input = input.into();
-            if log::log_enabled!(log::Level::Debug) {
-                if let Ok(str) = str::from_utf8(&input) {
-                    log::debug!("Writing to PTY: {:?}", str);
-                } else {
-                    log::debug!("Writing to PTY: {:?}", input);
-                }
+        let input = input.into();
+        if log::log_enabled!(log::Level::Debug) {
+            if let Ok(str) = str::from_utf8(&input) {
+                log::debug!("Writing to PTY: {:?}", str);
+            } else {
+                log::debug!("Writing to PTY: {:?}", input);
             }
-            pty_tx.notify(input);
+        }
+        match &self.terminal_type {
+            TerminalType::Pty { pty_tx, .. } => pty_tx.notify(input),
+            TerminalType::ExternalPty { command_tx } => {
+                command_tx
+                    .unbounded_send(ExternalPtyCommand::Input(input.into_owned()))
+                    .ok();
+            }
+            TerminalType::DisplayOnly => {}
         }
     }
 
@@ -2150,7 +2277,7 @@ impl Terminal {
                 .read()
                 .as_ref()
                 .map(|process| process.cwd.clone()),
-            TerminalType::DisplayOnly => None,
+            TerminalType::ExternalPty { .. } | TerminalType::DisplayOnly => None,
         }
     }
 
@@ -2201,7 +2328,9 @@ impl Terminal {
                             format!("{process_file} — {process_name}")
                         })
                         .unwrap_or_else(|| "Terminal".to_string()),
-                    TerminalType::DisplayOnly => "Terminal".to_string(),
+                    TerminalType::ExternalPty { .. } | TerminalType::DisplayOnly => {
+                        "Terminal".to_string()
+                    }
                 }),
         }
     }
@@ -2223,19 +2352,31 @@ impl Terminal {
     pub fn pid(&self) -> Option<sysinfo::Pid> {
         match &self.terminal_type {
             TerminalType::Pty { info, .. } => info.pid(),
-            TerminalType::DisplayOnly => None,
+            TerminalType::ExternalPty { .. } | TerminalType::DisplayOnly => None,
         }
     }
 
     pub fn pid_getter(&self) -> Option<&ProcessIdGetter> {
         match &self.terminal_type {
             TerminalType::Pty { info, .. } => Some(info.pid_getter()),
-            TerminalType::DisplayOnly => None,
+            TerminalType::ExternalPty { .. } | TerminalType::DisplayOnly => None,
         }
     }
 
     pub fn task(&self) -> Option<&TaskState> {
         self.task.as_ref()
+    }
+
+    pub fn remote_session_id(&self) -> Option<&str> {
+        self.remote_session_id.as_deref()
+    }
+
+    pub fn terminal_profile_id(&self) -> Option<&str> {
+        self.terminal_profile_id.as_deref()
+    }
+
+    pub fn is_remote_persistent(&self) -> bool {
+        self.remote_persistent
     }
 
     pub fn wait_for_completed_task(&self, cx: &App) -> Task<Option<ExitStatus>> {
@@ -2442,19 +2583,20 @@ unsafe fn append_text_to_term(term: &mut Term<ZedListener>, text_lines: &[&str])
 
 impl Drop for Terminal {
     fn drop(&mut self) {
-        if let TerminalType::Pty { pty_tx, info } =
-            std::mem::replace(&mut self.terminal_type, TerminalType::DisplayOnly)
-        {
-            pty_tx.0.send(Msg::Shutdown).ok();
-            info.terminate_child_process();
+        match std::mem::replace(&mut self.terminal_type, TerminalType::DisplayOnly) {
+            TerminalType::Pty { pty_tx, info } => {
+                pty_tx.0.send(Msg::Shutdown).ok();
+                info.terminate_child_process();
 
-            let timer = self.background_executor.timer(Duration::from_millis(100));
-            self.background_executor
-                .spawn(async move {
-                    timer.await;
-                    info.kill_child_process();
-                })
-                .detach();
+                let timer = self.background_executor.timer(Duration::from_millis(100));
+                self.background_executor
+                    .spawn(async move {
+                        timer.await;
+                        info.kill_child_process();
+                    })
+                    .detach();
+            }
+            TerminalType::ExternalPty { .. } | TerminalType::DisplayOnly => {}
         }
     }
 }

@@ -211,10 +211,24 @@ impl TerminalView {
         cx: &mut Context<Workspace>,
     ) {
         let local = action.local;
+        let profile_id = action.profile_id.clone();
         let working_directory = default_working_directory(workspace, cx);
         TerminalPanel::add_center_terminal(workspace, window, cx, move |project, cx| {
             if local {
                 project.create_local_terminal(cx)
+            } else if let Some(profile_id) = profile_id {
+                let settings = TerminalSettings::get_global(cx);
+                if let Some(profile) = settings.profiles.get(&profile_id) {
+                    project.create_terminal_from_profile(
+                        profile_id.clone(),
+                        profile.label.clone().unwrap_or_else(|| profile_id.clone()),
+                        working_directory,
+                        profile.persistent && settings.persistent_sessions.remote,
+                        cx,
+                    )
+                } else {
+                    project.create_terminal_shell(working_directory, cx)
+                }
             } else {
                 project.create_terminal_shell(working_directory, cx)
             }
@@ -269,6 +283,8 @@ impl TerminalView {
             cx.observe_global::<SettingsStore>(Self::settings_changed),
         ];
 
+        let needs_serialize = terminal.read(cx).is_remote_persistent();
+
         Self {
             terminal,
             workspace: workspace_handle,
@@ -287,7 +303,7 @@ impl TerminalView {
             block_below_cursor: None,
             scroll_top: Pixels::ZERO,
             scroll_handle,
-            needs_serialize: false,
+            needs_serialize,
             custom_title: None,
             ime_state: None,
             self_handle: cx.entity().downgrade(),
@@ -1759,7 +1775,7 @@ impl SerializableItem for TerminalView {
         cx: &mut Context<Self>,
     ) -> Option<Task<anyhow::Result<()>>> {
         let terminal = self.terminal().read(cx);
-        if terminal.task().is_some() {
+        if terminal.task().is_some() && !terminal.is_remote_persistent() {
             return None;
         }
 
@@ -1770,6 +1786,9 @@ impl SerializableItem for TerminalView {
         let workspace_id = self.workspace_id?;
         let cwd = terminal.working_directory();
         let custom_title = self.custom_title.clone();
+        let remote_session_id = terminal.remote_session_id().map(ToOwned::to_owned);
+        let profile_id = terminal.terminal_profile_id().map(ToOwned::to_owned);
+        let is_remote_persistent = terminal.is_remote_persistent();
         self.needs_serialize = false;
 
         let db = TerminalDb::global(cx);
@@ -1780,6 +1799,14 @@ impl SerializableItem for TerminalView {
             }
             db.save_custom_title(item_id, workspace_id, custom_title)
                 .await?;
+            db.save_remote_session(
+                item_id,
+                workspace_id,
+                remote_session_id,
+                profile_id,
+                is_remote_persistent,
+            )
+            .await?;
             Ok(())
         }))
     }
@@ -1797,7 +1824,7 @@ impl SerializableItem for TerminalView {
         cx: &mut App,
     ) -> Task<anyhow::Result<Entity<Self>>> {
         window.spawn(cx, async move |cx| {
-            let (cwd, custom_title) = cx
+            let (cwd, custom_title, remote_session) = cx
                 .update(|_window, cx| {
                     let db = TerminalDb::global(cx);
                     let from_db = db
@@ -1819,14 +1846,30 @@ impl SerializableItem for TerminalView {
                         .log_err()
                         .flatten()
                         .filter(|title| !title.trim().is_empty());
-                    (cwd, custom_title)
+                    let remote_session = db
+                        .get_remote_session(item_id, workspace_id)
+                        .log_err()
+                        .flatten();
+                    (cwd, custom_title, remote_session)
                 })
                 .ok()
-                .unwrap_or((None, None));
+                .unwrap_or((None, None, None));
 
-            let terminal = project
-                .update(cx, |project, cx| project.create_terminal_shell(cwd, cx))
-                .await?;
+            let terminal = if let Some(remote_session) = remote_session
+                && remote_session.is_remote_persistent
+                && let Some(profile_id) = remote_session.profile_id
+            {
+                let label = custom_title.clone().unwrap_or_else(|| profile_id.clone());
+                project
+                    .update(cx, |project, cx| {
+                        project.create_terminal_from_profile(profile_id, label, cwd, true, cx)
+                    })
+                    .await?
+            } else {
+                project
+                    .update(cx, |project, cx| project.create_terminal_shell(cwd, cx))
+                    .await?
+            };
             cx.update(|window, cx| {
                 cx.new(|cx| {
                     let mut view = TerminalView::new(

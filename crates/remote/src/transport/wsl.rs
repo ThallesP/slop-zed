@@ -529,6 +529,12 @@ impl RemoteConnection for WslRemoteConnection {
         self.default_system_shell.clone()
     }
 
+    fn remote_server_binary_path(&self) -> Option<String> {
+        self.remote_binary_path
+            .as_ref()
+            .map(|path| path.display(PathStyle::Posix).into_owned())
+    }
+
     fn has_wsl_interop(&self) -> bool {
         self.has_wsl_interop
     }

@@ -10,8 +10,8 @@ pub use settings::AlternateScroll;
 
 use settings::{
     IntoGpui, PathHyperlinkRegex, RegisterSetting, ShowScrollbar, TerminalBell, TerminalBlink,
-    TerminalDockPosition, TerminalLineHeight, VenvSettings, WorkingDirectory,
-    merge_from::MergeFrom,
+    TerminalDockPosition, TerminalLineHeight, TerminalPersistentSessionsContent,
+    TerminalProfileContent, VenvSettings, WorkingDirectory, merge_from::MergeFrom,
 };
 use task::Shell;
 use theme_settings::FontFamilyName;
@@ -53,6 +53,31 @@ pub struct TerminalSettings {
     pub path_hyperlink_timeout_ms: u64,
     pub show_count_badge: bool,
     pub bell: TerminalBell,
+    pub persistent_sessions: TerminalPersistentSessions,
+    pub default_profile: String,
+    pub profiles: HashMap<String, TerminalProfile>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct TerminalPersistentSessions {
+    pub remote: bool,
+    pub scrollback_bytes: usize,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct TerminalProfile {
+    pub label: Option<String>,
+    pub shell: Option<Shell>,
+    pub cwd: Option<String>,
+    pub env: HashMap<String, String>,
+    pub persistent: bool,
+    pub debug: Option<TerminalProfileDebug>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct TerminalProfileDebug {
+    pub adapter: String,
+    pub debug_type: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -135,7 +160,42 @@ impl settings::Settings for TerminalSettings {
             path_hyperlink_timeout_ms: project_content.path_hyperlink_timeout_ms.unwrap(),
             show_count_badge: user_content.show_count_badge.unwrap(),
             bell: user_content.bell.unwrap(),
+            persistent_sessions: terminal_persistent_sessions(
+                user_content.persistent_sessions.unwrap(),
+            ),
+            default_profile: user_content.default_profile.unwrap(),
+            profiles: user_content
+                .profiles
+                .unwrap()
+                .into_iter()
+                .map(|(id, profile)| (id, terminal_profile(profile)))
+                .collect(),
         }
+    }
+}
+
+fn terminal_persistent_sessions(
+    content: TerminalPersistentSessionsContent,
+) -> TerminalPersistentSessions {
+    TerminalPersistentSessions {
+        remote: content.remote.unwrap_or_default(),
+        scrollback_bytes: content.scrollback_bytes.unwrap_or(10 * 1024 * 1024),
+    }
+}
+
+fn terminal_profile(content: TerminalProfileContent) -> TerminalProfile {
+    TerminalProfile {
+        label: content.label,
+        shell: content.shell.map(settings_shell_to_task_shell),
+        cwd: content.cwd,
+        env: content.env.unwrap_or_default(),
+        persistent: content.persistent.unwrap_or_default(),
+        debug: content.debug.and_then(|debug| {
+            Some(TerminalProfileDebug {
+                adapter: debug.adapter?,
+                debug_type: debug.debug_type,
+            })
+        }),
     }
 }
 

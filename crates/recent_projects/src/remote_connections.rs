@@ -8,13 +8,14 @@ use askpass::EncryptedPassword;
 use editor::Editor;
 use extension_host::ExtensionStore;
 use futures::{FutureExt as _, channel::oneshot, select};
-use gpui::{AppContext, AsyncApp, PromptLevel, WindowHandle};
+use gpui::{AppContext, AsyncApp, Entity, PromptLevel, WindowHandle};
 
 use project::trusted_worktrees;
 use remote::{
     DockerConnectionOptions, Interactive, RemoteConnection, RemoteConnectionOptions,
     SshConnectionOptions,
 };
+use rpc::{TypedEnvelope, proto};
 pub use settings::SshConnection;
 use settings::{DevContainerConnection, ExtendingVec, RegisterSetting, Settings, WslConnection};
 use util::paths::PathWithPosition;
@@ -436,7 +437,59 @@ pub async fn open_remote_project(
             });
         })
         .ok();
+    register_remote_open_paths_handler(&window, connection_options.clone(), app_state.clone(), cx);
     Ok(window)
+}
+
+fn register_remote_open_paths_handler(
+    window: &WindowHandle<MultiWorkspace>,
+    connection_options: RemoteConnectionOptions,
+    app_state: Arc<AppState>,
+    cx: &mut AsyncApp,
+) {
+    let Ok(workspace) = window.update(cx, |multi_workspace, _, _| {
+        multi_workspace.workspace().clone()
+    }) else {
+        return;
+    };
+
+    let Some(remote_client) = workspace.read_with(cx, |workspace, cx| {
+        workspace.project().read(cx).remote_client()
+    }) else {
+        return;
+    };
+
+    remote_client.read_with(cx, |remote_client, _| {
+        remote_client.proto_client().add_message_handler(
+            workspace.downgrade(),
+            move |_workspace: Entity<Workspace>,
+                  envelope: TypedEnvelope<proto::RemoteOpenPaths>,
+                  mut cx| {
+                let connection_options = connection_options.clone();
+                let app_state = app_state.clone();
+                async move {
+                    let paths = envelope
+                        .payload
+                        .paths
+                        .into_iter()
+                        .map(PathBuf::from)
+                        .collect();
+                    Box::pin(open_remote_project(
+                        connection_options,
+                        paths,
+                        app_state,
+                        OpenOptions {
+                            workspace_matching: workspace::WorkspaceMatching::None,
+                            ..Default::default()
+                        },
+                        &mut cx,
+                    ))
+                    .await?;
+                    Ok(())
+                }
+            },
+        );
+    });
 }
 
 pub fn navigate_to_positions(

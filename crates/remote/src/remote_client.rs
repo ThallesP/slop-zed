@@ -982,6 +982,14 @@ impl RemoteClient {
         self.client.clone().into()
     }
 
+    pub fn unique_identifier(&self) -> &str {
+        &self.unique_identifier
+    }
+
+    pub fn remote_server_binary_path(&self) -> Option<String> {
+        self.remote_connection()?.remote_server_binary_path()
+    }
+
     pub fn connection_options(&self) -> RemoteConnectionOptions {
         self.connection_options.clone()
     }
@@ -1546,6 +1554,9 @@ pub trait RemoteConnection: Send + Sync {
     fn shell(&self) -> String;
     fn default_system_shell(&self) -> String;
     fn has_wsl_interop(&self) -> bool;
+    fn remote_server_binary_path(&self) -> Option<String> {
+        None
+    }
 
     #[cfg(any(test, feature = "test-support"))]
     fn simulate_disconnect(&self, _: &AsyncApp) {}

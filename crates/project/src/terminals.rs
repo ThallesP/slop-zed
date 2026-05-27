@@ -1,12 +1,13 @@
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use collections::HashMap;
 use gpui::{App, AppContext as _, Context, Entity, Task, WeakEntity};
 
 use async_channel::bounded;
-use futures::{FutureExt, future::Shared};
+use futures::{FutureExt, StreamExt, channel::mpsc::unbounded, future::Shared};
 use itertools::Itertools as _;
 use language::LanguageName;
 use remote::RemoteClient;
+use rpc::proto;
 use settings::{Settings, SettingsLocation};
 use std::{
     borrow::Cow,
@@ -15,10 +16,11 @@ use std::{
 };
 use task::{Shell, ShellBuilder, ShellKind, SpawnInTerminal};
 use terminal::{
-    TaskState, TaskStatus, Terminal, TerminalBuilder, insert_zed_terminal_env,
-    terminal_settings::TerminalSettings,
+    ExternalPtyCommand, TaskState, TaskStatus, Terminal, TerminalBounds, TerminalBuilder,
+    insert_zed_terminal_env, terminal_settings::TerminalSettings,
 };
 use util::{
+    ResultExt,
     command::new_std_command, get_default_system_shell, get_system_shell, maybe, rel_path::RelPath,
 };
 
@@ -26,6 +28,7 @@ use crate::{Project, ProjectPath};
 
 pub struct Terminals {
     pub(crate) local_handles: Vec<WeakEntity<terminal::Terminal>>,
+    pub(crate) remote_session_handles: HashMap<String, WeakEntity<terminal::Terminal>>,
 }
 
 impl Project {
@@ -136,7 +139,7 @@ impl Project {
             let mut env = env_task.await.unwrap_or_default();
             env.extend(settings.env);
 
-            let activation_script = maybe!(async {
+            let mut activation_script = maybe!(async {
                 for toolchain in toolchains {
                     let Some(toolchain) = toolchain.await else {
                         continue;
@@ -154,6 +157,11 @@ impl Project {
             })
             .await
             .unwrap_or_default();
+            if remote_client.is_some()
+                && let Some(script) = remote_cli_activation_script(shell_kind)
+            {
+                activation_script.insert(0, script);
+            }
 
             let builder = project
                 .update(cx, move |_, cx| {
@@ -291,6 +299,29 @@ impl Project {
         self.create_terminal_shell_internal(cwd, false, cx)
     }
 
+    pub fn create_terminal_from_profile(
+        &mut self,
+        profile_id: String,
+        label: String,
+        cwd: Option<PathBuf>,
+        persistent: bool,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<Entity<Terminal>>> {
+        if persistent
+            && self.remote_client.is_some()
+            && let Some(task) = self.create_remote_persistent_terminal(
+                profile_id.clone(),
+                label.clone(),
+                cwd.clone(),
+                cx,
+            )
+        {
+            return task;
+        }
+
+        self.create_terminal_shell(cwd, cx)
+    }
+
     /// Creates a local terminal even if the project is remote.
     /// In remote projects: opens in Zed's launch directory (bypasses SSH).
     /// In local projects: opens in the project directory (same as regular terminals).
@@ -378,7 +409,7 @@ impl Project {
             let mut env = env_task.await.unwrap_or_default();
             env.extend(settings.env);
 
-            let activation_script = maybe!(async {
+            let mut activation_script = maybe!(async {
                 for toolchain in toolchains {
                     let Some(toolchain) = toolchain.await else {
                         continue;
@@ -396,6 +427,11 @@ impl Project {
             })
             .await
             .unwrap_or_default();
+            if remote_client.is_some()
+                && let Some(script) = remote_cli_activation_script(shell_kind)
+            {
+                activation_script.insert(0, script);
+            }
 
             let builder = project
                 .update(cx, move |_, cx| {
@@ -581,6 +617,148 @@ impl Project {
         &self.terminals.local_handles
     }
 
+    pub fn remote_terminal_handle_for_session(
+        &self,
+        session_id: &str,
+    ) -> Option<WeakEntity<terminal::Terminal>> {
+        self.terminals
+            .remote_session_handles
+            .get(session_id)
+            .cloned()
+    }
+
+    fn create_remote_persistent_terminal(
+        &mut self,
+        profile_id: String,
+        label: String,
+        cwd: Option<PathBuf>,
+        cx: &mut Context<Self>,
+    ) -> Option<Task<Result<Entity<Terminal>>>> {
+        let remote_client = self.remote_client.clone()?;
+        let settings = TerminalSettings::get(None, cx).clone();
+        let mut env = settings.env.clone();
+        insert_zed_terminal_env(&mut env, &release_channel::AppVersion::global(cx));
+
+        let proto_client = remote_client.read(cx).proto_client();
+        let path_style = self.path_style(cx);
+        let window_id = cx.entity_id().as_u64();
+        Some(cx.spawn(async move |project, cx| {
+            let session = proto_client
+                .request(proto::CreateTerminalSession {
+                    project_id: proto::REMOTE_SERVER_PROJECT_ID,
+                    profile_id: profile_id.clone(),
+                    label: label.clone(),
+                    cwd: cwd.as_ref().map(|cwd| cwd.to_string_lossy().into_owned()),
+                    program: None,
+                    args: Vec::new(),
+                    env: env.into_iter().collect(),
+                    initial_size: Some(terminal_size_proto(TerminalBounds::default())),
+                    persistent: true,
+                })
+                .await?;
+            let session_id = session
+                .session_id
+                .context("remote server did not return a terminal session id")?
+                .id;
+            let (command_tx, mut command_rx) = unbounded::<ExternalPtyCommand>();
+            let builder = TerminalBuilder::new_external_pty(
+                settings.cursor_shape,
+                settings.alternate_scroll,
+                settings.max_scroll_history_lines,
+                settings.path_hyperlink_regexes,
+                settings.path_hyperlink_timeout_ms,
+                window_id,
+                command_tx,
+                cx.background_executor(),
+                path_style,
+                Some(label),
+                Some(session_id.clone()),
+                Some(profile_id),
+                true,
+            )?;
+
+            let session_id_for_terminal = session_id.clone();
+            let terminal_handle = project.update(cx, move |this, cx| {
+                let terminal_handle = cx.new(|cx| builder.subscribe(cx));
+                this.terminals
+                    .remote_session_handles
+                    .insert(session_id_for_terminal.clone(), terminal_handle.downgrade());
+                this.terminals
+                    .local_handles
+                    .push(terminal_handle.downgrade());
+
+                let id = terminal_handle.entity_id();
+                let session_id_for_release = session_id_for_terminal.clone();
+                cx.observe_release(&terminal_handle, move |project, _terminal, cx| {
+                    if let Some(index) = project
+                        .terminals
+                        .local_handles
+                        .iter()
+                        .position(|terminal| terminal.entity_id() == id)
+                    {
+                        project.terminals.local_handles.remove(index);
+                    }
+                    project
+                        .terminals
+                        .remote_session_handles
+                        .remove(&session_id_for_release);
+                    cx.notify();
+                })
+                .detach();
+
+                terminal_handle
+            })?;
+
+            let attach_id = terminal_handle.entity_id().as_u64();
+            proto_client
+                .request(proto::AttachTerminalSession {
+                    project_id: proto::REMOTE_SERVER_PROJECT_ID,
+                    session_id: Some(proto::TerminalSessionId {
+                        id: session_id.clone(),
+                    }),
+                    attach_id,
+                    size: Some(terminal_size_proto(TerminalBounds::default())),
+                })
+                .await?;
+
+            cx.background_spawn({
+                let proto_client = proto_client.clone();
+                let session_id = session_id.clone();
+                async move {
+                    while let Some(command) = command_rx.next().await {
+                        match command {
+                            ExternalPtyCommand::Input(data) => {
+                                proto_client
+                                    .request(proto::TerminalInput {
+                                        session_id: Some(proto::TerminalSessionId {
+                                            id: session_id.clone(),
+                                        }),
+                                        data,
+                                    })
+                                    .await
+                                    .log_err();
+                            }
+                            ExternalPtyCommand::Resize(bounds) => {
+                                proto_client
+                                    .request(proto::ResizeTerminalSession {
+                                        session_id: Some(proto::TerminalSessionId {
+                                            id: session_id.clone(),
+                                        }),
+                                        size: Some(terminal_size_proto(bounds)),
+                                    })
+                                    .await
+                                    .log_err();
+                            }
+                        }
+                    }
+                }
+            })
+            .detach();
+
+            Ok(terminal_handle)
+        }))
+    }
+
     fn resolve_directory_environment(
         &self,
         shell: &str,
@@ -606,6 +784,15 @@ impl Project {
     }
 }
 
+fn terminal_size_proto(bounds: TerminalBounds) -> proto::TerminalSize {
+    proto::TerminalSize {
+        rows: bounds.num_lines() as u32,
+        columns: bounds.num_columns() as u32,
+        cell_width: f32::from(bounds.cell_width()) as u32,
+        cell_height: f32::from(bounds.line_height()) as u32,
+    }
+}
+
 fn create_remote_shell(
     spawn_command: Option<(&String, &Vec<String>)>,
     mut env: HashMap<String, String>,
@@ -613,10 +800,21 @@ fn create_remote_shell(
     remote_client: Entity<RemoteClient>,
     cx: &mut App,
 ) -> Result<(Shell, HashMap<String, String>)> {
-    let connection_options = remote_client.read(cx).connection_options();
+    let remote_client = remote_client.read(cx);
+    let connection_options = remote_client.connection_options();
     if let Some(remote_url) = ssh_remote_url(&connection_options)? {
         env.insert("ZED_SSH_REMOTE_URL".to_string(), remote_url);
     }
+    if let Some(remote_server_binary_path) = remote_client.remote_server_binary_path() {
+        env.insert(
+            "ZED_REMOTE_SERVER_BINARY".to_string(),
+            remote_server_binary_path,
+        );
+    }
+    env.insert(
+        "ZED_REMOTE_SERVER_IDENTIFIER".to_string(),
+        remote_client.unique_identifier().to_string(),
+    );
     insert_zed_terminal_env(&mut env, &release_channel::AppVersion::global(cx));
 
     let (program, args) = match spawn_command {
@@ -624,7 +822,7 @@ fn create_remote_shell(
         None => (None, &Vec::new()),
     };
 
-    let command = remote_client.read(cx).build_command(
+    let command = remote_client.build_command(
         program,
         args.as_slice(),
         &env,
@@ -643,6 +841,28 @@ fn create_remote_shell(
         },
         command.env,
     ))
+}
+
+fn remote_cli_activation_script(shell_kind: ShellKind) -> Option<String> {
+    match shell_kind {
+        ShellKind::Fish => Some(
+            "function zed; command \"$ZED_REMOTE_SERVER_BINARY\" open --identifier \"$ZED_REMOTE_SERVER_IDENTIFIER\" $argv; end"
+                .to_string(),
+        ),
+        ShellKind::Posix => Some(
+            "zed() { command \"$ZED_REMOTE_SERVER_BINARY\" open --identifier \"$ZED_REMOTE_SERVER_IDENTIFIER\" \"$@\"; }"
+                .to_string(),
+        ),
+        ShellKind::Cmd
+        | ShellKind::PowerShell
+        | ShellKind::Pwsh
+        | ShellKind::Csh
+        | ShellKind::Tcsh
+        | ShellKind::Nushell
+        | ShellKind::Rc
+        | ShellKind::Xonsh
+        | ShellKind::Elvish => None,
+    }
 }
 
 fn ssh_remote_url(connection_options: &remote::RemoteConnectionOptions) -> Result<Option<String>> {

@@ -53,6 +53,7 @@ project.workspace = true
 prompt_store.workspace = true
 quick-xml.workspace = true
 regex.workspace = true
+remote.workspace = true
 rust-embed.workspace = true
 schemars.workspace = true
 serde.workspace = true

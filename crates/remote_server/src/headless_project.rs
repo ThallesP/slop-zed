@@ -48,6 +48,8 @@ use sysinfo::{ProcessRefreshKind, RefreshKind, System, UpdateKind};
 use util::{ResultExt, paths::PathStyle, rel_path::RelPath};
 use worktree::Worktree;
 
+use crate::terminal_sessions::TerminalSessionStore;
+
 pub struct HeadlessProject {
     pub fs: Arc<dyn Fs>,
     pub session: AnyProtoClient,
@@ -65,6 +67,7 @@ pub struct HeadlessProject {
     pub extensions: Entity<HeadlessExtensionStore>,
     pub git_store: Entity<GitStore>,
     pub environment: Entity<ProjectEnvironment>,
+    pub terminal_sessions: Entity<TerminalSessionStore>,
     pub profiling_collector: gpui::ProfilingCollector,
     // Used mostly to keep alive the toolchain store for RPC handlers.
     // Local variant is used within LSP store, but that's a separate entity.
@@ -122,6 +125,7 @@ impl HeadlessProject {
 
         let environment =
             cx.new(|cx| ProjectEnvironment::new(None, worktree_store.downgrade(), None, true, cx));
+        let terminal_sessions = cx.new(|_| TerminalSessionStore::new(session.clone()));
         let manifest_tree = ManifestTree::new(worktree_store.clone(), cx);
         let toolchain_store = cx.new(|cx| {
             ToolchainStore::local(
@@ -324,6 +328,7 @@ impl HeadlessProject {
 
         session.add_request_handler(cx.weak_entity(), Self::handle_spawn_kernel);
         session.add_request_handler(cx.weak_entity(), Self::handle_kill_kernel);
+        TerminalSessionStore::init(&session, terminal_sessions.clone(), cx);
 
         BufferStore::init(&session);
         WorktreeStore::init(&session);
@@ -355,6 +360,7 @@ impl HeadlessProject {
             extensions,
             git_store,
             environment,
+            terminal_sessions,
             profiling_collector: gpui::ProfilingCollector::new(startup_time),
             _toolchain_store: toolchain_store,
             kernels: Default::default(),
