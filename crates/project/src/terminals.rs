@@ -854,8 +854,13 @@ fn remote_cli_activation_script(shell_kind: ShellKind) -> Option<String> {
                 "if test -n \"$ZED_REMOTE_SERVER_BINARY\"; and test -n \"$ZED_REMOTE_SERVER_IDENTIFIER\"; and command \"$HOME/$ZED_REMOTE_SERVER_BINARY\" open --help >/dev/null 2>&1; ",
                 "command \"$HOME/$ZED_REMOTE_SERVER_BINARY\" open --identifier \"$ZED_REMOTE_SERVER_IDENTIFIER\" $argv; ",
                 "else; ",
-                "echo \"zed: this remote server does not support opening paths from the terminal. Reconnect to this remote project after Zed updates the remote server.\" >&2; ",
-                "return 2; ",
+                "command zed $argv; or begin; ",
+                "set zed_status $status; ",
+                "if test $zed_status -eq 127; ",
+                "echo \"zed: this remote server does not support opening paths from the terminal, and no zed CLI was found on PATH.\" >&2; ",
+                "end; ",
+                "return $zed_status; ",
+                "end; ",
                 "end; ",
                 "end"
             )
@@ -867,8 +872,12 @@ fn remote_cli_activation_script(shell_kind: ShellKind) -> Option<String> {
                 "if [ -n \"$ZED_REMOTE_SERVER_BINARY\" ] && [ -n \"$ZED_REMOTE_SERVER_IDENTIFIER\" ] && command \"$HOME/$ZED_REMOTE_SERVER_BINARY\" open --help >/dev/null 2>&1; then ",
                 "command \"$HOME/$ZED_REMOTE_SERVER_BINARY\" open --identifier \"$ZED_REMOTE_SERVER_IDENTIFIER\" \"$@\"; ",
                 "else ",
-                "printf '%s\\n' 'zed: this remote server does not support opening paths from the terminal. Reconnect to this remote project after Zed updates the remote server.' >&2; ",
-                "return 2; ",
+                "command zed \"$@\"; ",
+                "status=$?; ",
+                "if [ $status -eq 127 ]; then ",
+                "printf '%s\\n' 'zed: this remote server does not support opening paths from the terminal, and no zed CLI was found on PATH.' >&2; ",
+                "fi; ",
+                "return $status; ",
                 "fi; ",
                 "}"
             )

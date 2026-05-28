@@ -812,7 +812,7 @@ impl SshRemoteConnection {
         let dst_path =
             paths::remote_server_dir_relative().join(RelPath::unix(&binary_name).unwrap());
 
-        let binary_is_compatible = self
+        let binary_exists_on_server = self
             .socket
             .run_command(
                 self.ssh_shell_kind,
@@ -821,23 +821,13 @@ impl SshRemoteConnection {
                 true,
             )
             .await
-            .is_ok()
-            && self
-                .socket
-                .run_command(
-                    self.ssh_shell_kind,
-                    &dst_path.display(self.path_style()),
-                    &["open", "--help"],
-                    true,
-                )
-                .await
-                .is_ok();
+            .is_ok();
 
         #[cfg(any(debug_assertions, feature = "build-remote-server-binary"))]
         if let Some(remote_server_path) = super::build_remote_server_from_source(
             &self.ssh_platform,
             delegate.as_ref(),
-            binary_is_compatible,
+            binary_exists_on_server,
             cx,
         )
         .await?
@@ -857,7 +847,7 @@ impl SshRemoteConnection {
             return Ok(dst_path);
         }
 
-        if binary_is_compatible {
+        if binary_exists_on_server {
             return Ok(dst_path);
         }
 

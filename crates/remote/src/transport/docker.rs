@@ -200,7 +200,7 @@ impl DockerExecConnection {
         let dst_path =
             paths::remote_server_dir_relative().join(RelPath::unix(&binary_name).unwrap());
 
-        let binary_is_compatible = self
+        let binary_exists_on_server = self
             .run_docker_exec(
                 &dst_path.display(self.path_style()),
                 Some(&remote_dir_for_server),
@@ -208,21 +208,12 @@ impl DockerExecConnection {
                 &["version"],
             )
             .await
-            .is_ok()
-            && self
-                .run_docker_exec(
-                    &dst_path.display(self.path_style()),
-                    Some(&remote_dir_for_server),
-                    &Default::default(),
-                    &["open", "--help"],
-                )
-                .await
-                .is_ok();
+            .is_ok();
         #[cfg(any(debug_assertions, feature = "build-remote-server-binary"))]
         if let Some(remote_server_path) = super::build_remote_server_from_source(
             &remote_platform,
             delegate.as_ref(),
-            binary_is_compatible,
+            binary_exists_on_server,
             cx,
         )
         .await?
@@ -248,7 +239,7 @@ impl DockerExecConnection {
             return Ok(dst_path);
         }
 
-        if binary_is_compatible {
+        if binary_exists_on_server {
             return Ok(dst_path);
         }
 
