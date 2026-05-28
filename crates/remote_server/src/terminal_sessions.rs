@@ -1,6 +1,6 @@
 use anyhow::{Context as _, Result, anyhow};
 use collections::HashMap;
-use gpui::{App, AsyncApp, Context, Entity};
+use gpui::{App, AsyncApp, Entity};
 use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use rpc::{
     AnyProtoClient, TypedEnvelope,
@@ -73,7 +73,7 @@ impl TerminalSessionStore {
         session.add_request_handler(store.downgrade(), Self::handle_resize_terminal_session);
         session.add_request_handler(store.downgrade(), Self::handle_close_terminal_session);
         session.add_request_handler(store.downgrade(), Self::handle_list_terminal_sessions);
-        cx.observe_release(&store, |_, _, _| {}).detach();
+        cx.observe_release(&store, |_, _| {}).detach();
     }
 
     async fn handle_create_terminal_session(
@@ -81,14 +81,17 @@ impl TerminalSessionStore {
         envelope: TypedEnvelope<proto::CreateTerminalSession>,
         mut cx: AsyncApp,
     ) -> Result<proto::CreateTerminalSessionResponse> {
-        let payload = envelope.payload;
+        let mut payload = envelope.payload;
         anyhow::ensure!(
             payload.project_id == REMOTE_SERVER_PROJECT_ID,
             "invalid remote terminal project id {}",
             payload.project_id
         );
-        let size = payload.initial_size.context("missing terminal size")?;
-        let session = this.update(&mut cx, |this, _| this.create_session(payload, size))??;
+        let size = payload
+            .initial_size
+            .take()
+            .context("missing terminal size")?;
+        let session = this.update(&mut cx, |this, _| this.create_session(payload, size))?;
         Ok(proto::CreateTerminalSessionResponse {
             session_id: Some(proto::TerminalSessionId {
                 id: session.id.clone(),
@@ -114,7 +117,7 @@ impl TerminalSessionStore {
                 .cloned()
                 .with_context(|| format!("terminal session not found: {session_id}"))?;
             Ok::<_, anyhow::Error>((session, this.session.clone()))
-        })??;
+        })?;
         session.attach(payload.attach_id, size, &client)?;
         Ok(proto::Ack {})
     }
@@ -134,7 +137,7 @@ impl TerminalSessionStore {
                 .get(&session_id)
                 .cloned()
                 .with_context(|| format!("terminal session not found: {session_id}"))
-        })??;
+        })?;
         session.write_input(&payload.data)?;
         Ok(proto::Ack {})
     }
@@ -155,7 +158,7 @@ impl TerminalSessionStore {
                 .get(&session_id)
                 .cloned()
                 .with_context(|| format!("terminal session not found: {session_id}"))
-        })??;
+        })?;
         session.resize(size)?;
         Ok(proto::Ack {})
     }
@@ -170,7 +173,7 @@ impl TerminalSessionStore {
             .session_id
             .context("missing terminal session id")?
             .id;
-        let session = this.update(&mut cx, |this, _| this.sessions.remove(&session_id))?;
+        let session = this.update(&mut cx, |this, _| this.sessions.remove(&session_id));
         if let Some(session) = session {
             session.close().log_err();
         }
@@ -192,7 +195,7 @@ impl TerminalSessionStore {
                 .values()
                 .map(|session| session.info())
                 .collect::<Vec<_>>()
-        })?;
+        });
         Ok(proto::ListTerminalSessionsResponse { sessions })
     }
 
