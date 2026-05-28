@@ -359,23 +359,71 @@ fn start_server(
     })
     .detach();
 
+    let ServerListeners {
+        stdin,
+        stdout,
+        stderr,
+    } = listeners;
+    let incoming_tx_for_stdin = incoming_tx.clone();
+    let outgoing_tx_for_stdin = outgoing_tx.clone();
+    cx.background_spawn(async move {
+        loop {
+            let (mut stdin_stream, _) = match stdin.accept().await {
+                Ok(stream) => stream,
+                Err(error) => {
+                    log::error!("failed to accept stdin connection: {error:?}");
+                    break;
+                }
+            };
+
+            let incoming_tx = incoming_tx_for_stdin.clone();
+            let outgoing_tx = outgoing_tx_for_stdin.clone();
+            smol::spawn(async move {
+                let mut input_buffer = Vec::new();
+                loop {
+                    match read_message(&mut stdin_stream, &mut input_buffer).await {
+                        Ok(message) => {
+                            let is_remote_open_paths = matches!(
+                                &message.payload,
+                                Some(proto::envelope::Payload::RemoteOpenPaths(_))
+                            );
+                            let send_result = if is_remote_open_paths {
+                                outgoing_tx.unbounded_send(message).map_err(|_| ())
+                            } else {
+                                incoming_tx.unbounded_send(message).map_err(|_| ())
+                            };
+                            if send_result.is_err() {
+                                log::info!(
+                                    "application message channel closed, stopping stdin reader"
+                                );
+                                break;
+                            }
+                        }
+                        Err(error) => {
+                            log::warn!("stdin read failed: {error:?}");
+                            break;
+                        }
+                    }
+                }
+            })
+            .detach();
+        }
+    })
+    .detach();
+
     cx.spawn(async move |cx| {
         loop {
-            let streams = futures::future::join3(
-                listeners.stdin.accept(),
-                listeners.stdout.accept(),
-                listeners.stderr.accept(),
-            );
+            let streams = futures::future::join(stdout.accept(), stderr.accept());
 
             log::info!("accepting new connections");
             let result = select! {
                 streams = streams.fuse() => {
-                    let (Ok((stdin_stream, _)), Ok((stdout_stream, _)), Ok((stderr_stream, _))) = streams else {
+                    let (Ok((stdout_stream, _)), Ok((stderr_stream, _))) = streams else {
                         log::error!("failed to accept new connections");
                         break;
                     };
                     log::info!("accepted new connections");
-                    anyhow::Ok((stdin_stream, stdout_stream, stderr_stream))
+                    anyhow::Ok((stdout_stream, stderr_stream))
                 }
                 _ = futures::FutureExt::fuse(cx.background_executor().timer(IDLE_TIMEOUT)) => {
                     log::warn!("timed out waiting for new connections after {:?}. exiting.", IDLE_TIMEOUT);
@@ -393,47 +441,17 @@ fn start_server(
                 }
             };
 
-            let Ok((mut stdin_stream, mut stdout_stream, mut stderr_stream)) = result else {
+            let Ok((mut stdout_stream, mut stderr_stream)) = result else {
                 break;
             };
 
-            let mut input_buffer = Vec::new();
             let mut output_buffer = Vec::new();
-
-            let (mut stdin_msg_tx, mut stdin_msg_rx) = mpsc::unbounded::<Envelope>();
-            cx.background_spawn(async move {
-                loop {
-                    match read_message(&mut stdin_stream, &mut input_buffer).await {
-                        Ok(msg) => {
-                            if (stdin_msg_tx.send(msg).await).is_err() {
-                                log::info!("stdin message channel closed, stopping stdin reader");
-                                break;
-                            }
-                        }
-                        Err(error) => {
-                            log::warn!("stdin read failed: {error:?}");
-                            break;
-                        }
-                    }
-                }
-            }).detach();
 
             loop {
 
                 select_biased! {
                     _ = app_quit_rx.next().fuse() => {
                         return anyhow::Ok(());
-                    }
-
-                    stdin_message = stdin_msg_rx.next().fuse() => {
-                        let Some(message) = stdin_message else {
-                            log::warn!("error reading message on stdin, dropping connection.");
-                            break;
-                        };
-                        if let Err(error) = incoming_tx.unbounded_send(message) {
-                            log::error!("failed to send message to application: {error:?}. exiting.");
-                            return Err(anyhow!(error));
-                        }
                     }
 
                     outgoing_message  = outgoing_rx.next().fuse() => {
