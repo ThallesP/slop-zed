@@ -20,8 +20,8 @@ use terminal::{
     insert_zed_terminal_env, terminal_settings::TerminalSettings,
 };
 use util::{
-    ResultExt,
-    command::new_std_command, get_default_system_shell, get_system_shell, maybe, rel_path::RelPath,
+    ResultExt, command::new_std_command, get_default_system_shell, get_system_shell, maybe,
+    rel_path::RelPath,
 };
 
 use crate::{Project, ProjectPath};
@@ -849,12 +849,30 @@ fn remote_cli_activation_script(shell_kind: ShellKind) -> Option<String> {
         // remote `$HOME`, so the activation script must resolve it via `$HOME` to work from
         // any cwd.
         ShellKind::Fish => Some(
-            "function zed; command \"$HOME/$ZED_REMOTE_SERVER_BINARY\" open --identifier \"$ZED_REMOTE_SERVER_IDENTIFIER\" $argv; end"
-                .to_string(),
+            concat!(
+                "function zed; ",
+                "if test -n \"$ZED_REMOTE_SERVER_BINARY\"; and test -n \"$ZED_REMOTE_SERVER_IDENTIFIER\"; and command \"$HOME/$ZED_REMOTE_SERVER_BINARY\" open --help >/dev/null 2>&1; ",
+                "command \"$HOME/$ZED_REMOTE_SERVER_BINARY\" open --identifier \"$ZED_REMOTE_SERVER_IDENTIFIER\" $argv; ",
+                "else; ",
+                "echo \"zed: this remote server does not support opening paths from the terminal. Reconnect to this remote project after Zed updates the remote server.\" >&2; ",
+                "return 2; ",
+                "end; ",
+                "end"
+            )
+            .to_string(),
         ),
         ShellKind::Posix => Some(
-            "zed() { command \"$HOME/$ZED_REMOTE_SERVER_BINARY\" open --identifier \"$ZED_REMOTE_SERVER_IDENTIFIER\" \"$@\"; }"
-                .to_string(),
+            concat!(
+                "zed() { ",
+                "if [ -n \"$ZED_REMOTE_SERVER_BINARY\" ] && [ -n \"$ZED_REMOTE_SERVER_IDENTIFIER\" ] && command \"$HOME/$ZED_REMOTE_SERVER_BINARY\" open --help >/dev/null 2>&1; then ",
+                "command \"$HOME/$ZED_REMOTE_SERVER_BINARY\" open --identifier \"$ZED_REMOTE_SERVER_IDENTIFIER\" \"$@\"; ",
+                "else ",
+                "printf '%s\\n' 'zed: this remote server does not support opening paths from the terminal. Reconnect to this remote project after Zed updates the remote server.' >&2; ",
+                "return 2; ",
+                "fi; ",
+                "}"
+            )
+            .to_string(),
         ),
         ShellKind::Cmd
         | ShellKind::PowerShell
