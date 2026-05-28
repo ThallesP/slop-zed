@@ -7,6 +7,7 @@ use parking_lot::Mutex;
 use release_channel::{AppCommitSha, AppVersion, ReleaseChannel};
 use semver::Version as SemanticVersion;
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::time::Instant;
 use std::{
     path::{Path, PathBuf},
@@ -27,7 +28,7 @@ use rpc::proto::Envelope;
 use crate::{
     RemoteClientDelegate, RemoteConnection, RemoteConnectionOptions, RemoteOs, RemotePlatform,
     remote_client::{CommandTemplate, Interactive},
-    transport::parse_platform,
+    transport::{parse_platform, remote_server_cli_setup_script},
 };
 
 #[derive(
@@ -771,6 +772,8 @@ impl RemoteConnection for DockerExecConnection {
             }
         }
 
+        let shell = self.shell();
+        let shell_kind = ShellKind::new(&shell, false);
         let mut inner_program = Vec::new();
 
         if let Some(program) = program {
@@ -779,9 +782,32 @@ impl RemoteConnection for DockerExecConnection {
                 inner_program.push(arg.clone());
             }
         } else {
-            inner_program.push(self.shell());
+            inner_program.push(shell.clone());
             inner_program.push("-l".to_string());
         };
+
+        if env.contains_key("ZED_REMOTE_SERVER_BINARY")
+            && env.contains_key("ZED_REMOTE_SERVER_IDENTIFIER")
+            && let Some(setup_script) = remote_server_cli_setup_script(shell_kind)
+        {
+            let mut command = String::from(setup_script);
+            command.push_str("exec ");
+            if let Some(program) = inner_program.first() {
+                write!(
+                    command,
+                    "{}",
+                    shell_kind
+                        .try_quote_prefix_aware(program)
+                        .context("shell quoting")?
+                )?;
+            }
+            for arg in inner_program.iter().skip(1) {
+                let arg = shell_kind.try_quote(arg).context("shell quoting")?;
+                write!(command, " {arg}")?;
+            }
+
+            inner_program = vec![shell, "-c".to_string(), command];
+        }
 
         let mut docker_args = vec![
             "exec".to_string(),

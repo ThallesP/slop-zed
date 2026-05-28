@@ -1,7 +1,7 @@
 use crate::{
     RemoteArch, RemoteClientDelegate, RemoteOs, RemotePlatform,
     remote_client::{CommandTemplate, Interactive, RemoteConnection, RemoteConnectionOptions},
-    transport::{parse_platform, parse_shell},
+    transport::{parse_platform, parse_shell, remote_server_cli_setup_script},
 };
 use anyhow::{Context as _, Result, anyhow};
 use async_trait::async_trait;
@@ -1791,6 +1791,9 @@ fn build_command_posix(
 ) -> Result<CommandTemplate> {
     use std::fmt::Write as _;
 
+    let should_install_remote_cli = input_env.contains_key("ZED_REMOTE_SERVER_BINARY")
+        && input_env.contains_key("ZED_REMOTE_SERVER_IDENTIFIER");
+    let home_dir = input_env.get("HOME");
     let mut exec = String::new();
     if let Some(working_dir) = working_dir {
         let working_dir = RemotePathBuf::new(working_dir, ssh_path_style).to_string();
@@ -1834,10 +1837,23 @@ fn build_command_posix(
             ssh_shell_kind.sequential_and_commands_separator()
         )?;
     };
+    if should_install_remote_cli
+        && let Some(setup_script) = remote_server_cli_setup_script(ssh_shell_kind)
+    {
+        write!(exec, "{setup_script}")?;
+    }
+
     write!(exec, "exec env ")?;
 
     for (k, v) in input_env.iter() {
-        let assignment = format!("{k}={v}");
+        let assignment = if should_install_remote_cli
+            && k == "PATH"
+            && let Some(home_dir) = home_dir
+        {
+            format!("PATH={home_dir}/.local/bin:{v}")
+        } else {
+            format!("{k}={v}")
+        };
         let assignment = ssh_shell_kind
             .try_quote(&assignment)
             .context("shell quoting")?;

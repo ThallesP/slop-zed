@@ -1,7 +1,7 @@
 use crate::{
     RemoteArch, RemoteClientDelegate, RemoteOs, RemotePlatform,
     remote_client::{CommandTemplate, Interactive, RemoteConnection, RemoteConnectionOptions},
-    transport::{parse_platform, parse_shell},
+    transport::{parse_platform, parse_shell, remote_server_cli_setup_script},
 };
 use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
@@ -454,10 +454,28 @@ impl RemoteConnection for WslRemoteConnection {
             .map(|working_dir| RemotePathBuf::new(working_dir, PathStyle::Posix).to_string())
             .unwrap_or("~".to_string());
 
-        let mut exec = String::from("exec env ");
+        let should_install_remote_cli = env.contains_key("ZED_REMOTE_SERVER_BINARY")
+            && env.contains_key("ZED_REMOTE_SERVER_IDENTIFIER");
+        let home_dir = env.get("HOME");
+        let mut exec = String::new();
+
+        if should_install_remote_cli
+            && let Some(setup_script) = remote_server_cli_setup_script(shell_kind)
+        {
+            write!(exec, "{setup_script}")?;
+        }
+
+        exec.push_str("exec env ");
 
         for (key, value) in env.iter() {
-            let assignment = format!("{key}={value}");
+            let assignment = if should_install_remote_cli
+                && key == "PATH"
+                && let Some(home_dir) = home_dir
+            {
+                format!("PATH={home_dir}/.local/bin:{value}")
+            } else {
+                format!("{key}={value}")
+            };
             let assignment = shell_kind.try_quote(&assignment).context("shell quoting")?;
             write!(exec, "{assignment} ")?;
         }
