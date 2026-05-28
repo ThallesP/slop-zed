@@ -185,7 +185,7 @@ fn handle_rpc_messages_over_child_process_stdio(
 async fn build_remote_server_from_source(
     platform: &crate::RemotePlatform,
     delegate: &dyn crate::RemoteClientDelegate,
-    binary_exists_on_server: bool,
+    binary_is_compatible_on_server: bool,
     cx: &mut AsyncApp,
 ) -> Result<Option<std::path::PathBuf>> {
     use std::env::VarError;
@@ -206,7 +206,7 @@ async fn build_remote_server_from_source(
 
     let build_remote_server = match std::env::var("ZED_BUILD_REMOTE_SERVER") {
         Ok(value) if matches!(&*value, "never" | "false" | "no" | "off" | "0") => {
-            if !binary_exists_on_server {
+            if !binary_is_compatible_on_server {
                 log::info!(
                     "ZED_BUILD_REMOTE_SERVER is disabled; using prebuilt remote server binary"
                 );
@@ -215,7 +215,7 @@ async fn build_remote_server_from_source(
         }
         Ok(value) => value,
         Err(VarError::NotPresent) => {
-            if !binary_exists_on_server {
+            if !binary_is_compatible_on_server {
                 log::info!(
                     "ZED_BUILD_REMOTE_SERVER is not set; using prebuilt remote server binary"
                 );

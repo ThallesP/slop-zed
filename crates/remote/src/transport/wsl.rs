@@ -195,16 +195,20 @@ impl WslRemoteConnection {
                 .map_err(|e| anyhow!("Failed to create directory: {}", e))?;
         }
 
-        let binary_exists_on_server = self
+        let binary_is_compatible_on_server = self
             .run_wsl_command(&dst_path.display(PathStyle::Posix), &["version"])
             .await
-            .is_ok();
+            .is_ok()
+            && self
+                .run_wsl_command(&dst_path.display(PathStyle::Posix), &["open", "--help"])
+                .await
+                .is_ok();
 
         #[cfg(any(debug_assertions, feature = "build-remote-server-binary"))]
         if let Some(remote_server_path) = super::build_remote_server_from_source(
             &self.platform,
             delegate.as_ref(),
-            binary_exists_on_server,
+            binary_is_compatible_on_server,
             cx,
         )
         .await?
@@ -224,7 +228,7 @@ impl WslRemoteConnection {
             return Ok(dst_path);
         }
 
-        if binary_exists_on_server {
+        if binary_is_compatible_on_server {
             return Ok(dst_path);
         }
 
