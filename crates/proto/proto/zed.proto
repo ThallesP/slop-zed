@@ -486,17 +486,21 @@ message Envelope {
     SearchCommitsResponse search_commits_response = 450;
     GetInitialGraphData get_initial_graph_data = 451;
     GetInitialGraphDataResponse get_initial_graph_data_response = 452;
-    RemoteOpenPaths remote_open_paths = 453;
-    CreateTerminalSession create_terminal_session = 454;
-    CreateTerminalSessionResponse create_terminal_session_response = 455;
-    AttachTerminalSession attach_terminal_session = 456;
-    TerminalOutput terminal_output = 457;
-    TerminalInput terminal_input = 458;
-    ResizeTerminalSession resize_terminal_session = 459;
-    CloseTerminalSession close_terminal_session = 460;
-    ListTerminalSessions list_terminal_sessions = 461;
-    ListTerminalSessionsResponse list_terminal_sessions_response = 462;
-    TerminalSessionExited terminal_session_exited = 463; // current max
+    GetDocumentLinks get_document_links = 453;
+    GetDocumentLinksResponse get_document_links_response = 454;
+    ResolveDocumentLink resolve_document_link = 455;
+    ResolveDocumentLinkResponse resolve_document_link_response = 456;
+    RemoteOpenPaths remote_open_paths = 457;
+    CreateTerminalSession create_terminal_session = 458;
+    CreateTerminalSessionResponse create_terminal_session_response = 459;
+    AttachTerminalSession attach_terminal_session = 460;
+    TerminalOutput terminal_output = 461;
+    TerminalInput terminal_input = 462;
+    ResizeTerminalSession resize_terminal_session = 463;
+    CloseTerminalSession close_terminal_session = 464;
+    ListTerminalSessions list_terminal_sessions = 465;
+    ListTerminalSessionsResponse list_terminal_sessions_response = 466;
+    TerminalSessionExited terminal_session_exited = 467; // current max
   }
 
   reserved 87 to 88;
