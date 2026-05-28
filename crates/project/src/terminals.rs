@@ -843,65 +843,109 @@ fn create_remote_shell(
     ))
 }
 
+// This fallback must work when the downloaded remote server predates the `open` subcommand.
+const REMOTE_OPEN_PATHS_PYTHON_SOURCE: &str = r#"import os, socket, struct, sys
+socket_path = os.environ["ZED_REMOTE_SERVER_STDIN_SOCKET"]
+paths = sys.argv[1:] or [os.getcwd()]
+paths = [path if os.path.isabs(path) else os.path.abspath(path) for path in paths]
+def varint(value):
+    output = bytearray()
+    while value > 127:
+        output.append((value & 127) | 128)
+        value >>= 7
+    output.append(value)
+    return bytes(output)
+payload = bytearray()
+for path in paths:
+    encoded = path.encode()
+    payload += b"\x0a" + varint(len(encoded)) + encoded
+envelope = varint((453 << 3) | 2) + varint(len(payload)) + payload
+message = struct.pack("<I", len(envelope)) + envelope
+client = socket.socket(socket.AF_UNIX)
+try:
+    client.connect(socket_path)
+    client.sendall(message)
+except OSError as error:
+    raise SystemExit("zed: failed to send open request to remote server socket {}: {}".format(socket_path, error))
+finally:
+    client.close()
+"#;
+
 fn remote_cli_activation_script(shell_kind: ShellKind) -> Option<String> {
+    let python_argument = python_exec_argument(REMOTE_OPEN_PATHS_PYTHON_SOURCE);
+    let data_dir_name = paths::USER_DATA_DIR_NAME;
+    let data_dir_name_lowercase = paths::USER_DATA_DIR_NAME_LOWERCASE;
+
     match shell_kind {
         // `ZED_REMOTE_SERVER_BINARY` is a relative path (`.zed_server/...`) anchored at the
         // remote `$HOME`, so the activation script must resolve it via `$HOME` to work from
         // any cwd.
-        ShellKind::Fish => Some(
+        ShellKind::Fish => Some(format!(
             concat!(
                 "function zed; ",
                 "if test -n \"$ZED_REMOTE_SERVER_BINARY\"; and test -n \"$ZED_REMOTE_SERVER_IDENTIFIER\"; and command \"$HOME/$ZED_REMOTE_SERVER_BINARY\" open --help >/dev/null 2>&1; ",
                 "command \"$HOME/$ZED_REMOTE_SERVER_BINARY\" open --identifier \"$ZED_REMOTE_SERVER_IDENTIFIER\" $argv; ",
                 "else; ",
-                "set -l zed_cli; ",
-                "for dir in $PATH; ",
-                "set -l candidate \"$dir/zed\"; ",
-                "if test -x \"$candidate\"; and not test -d \"$candidate\"; and command \"$candidate\" --version 2>/dev/null | string match -q 'Zed *'; ",
-                "set zed_cli \"$candidate\"; ",
-                "break; ",
+                "if test -z \"$ZED_REMOTE_SERVER_IDENTIFIER\"; ",
+                "echo \"zed: this terminal is missing the remote server identifier.\" >&2; ",
+                "return 127; ",
                 "end; ",
-                "end; ",
-                "if test -n \"$zed_cli\"; ",
-                "command \"$zed_cli\" $argv; ",
+                "set -l zed_data_dir; ",
+                "if test (uname) = Darwin; ",
+                "set zed_data_dir \"$HOME/Library/Application Support/{data_dir_name}\"; ",
+                "else if test -n \"$FLATPAK_XDG_DATA_HOME\"; ",
+                "set zed_data_dir \"$FLATPAK_XDG_DATA_HOME/{data_dir_name_lowercase}\"; ",
+                "else if test -n \"$XDG_DATA_HOME\"; ",
+                "set zed_data_dir \"$XDG_DATA_HOME/{data_dir_name_lowercase}\"; ",
                 "else; ",
-                "echo \"zed: this remote server does not support opening paths from the terminal, and no Zed CLI was found on PATH.\" >&2; ",
+                "set zed_data_dir \"$HOME/.local/share/{data_dir_name_lowercase}\"; ",
+                "end; ",
+                "set -lx ZED_REMOTE_SERVER_STDIN_SOCKET \"$zed_data_dir/server_state/$ZED_REMOTE_SERVER_IDENTIFIER/stdin.sock\"; ",
+                "if command -q python3; ",
+                "command python3 -c {python_argument} $argv; ",
+                "else; ",
+                "echo \"zed: this remote server does not support opening paths from the terminal, and python3 was not found for the socket fallback.\" >&2; ",
                 "return 127; ",
                 "end; ",
                 "end; ",
                 "end"
-            )
-            .to_string(),
-        ),
-        ShellKind::Posix => Some(
+            ),
+            data_dir_name = data_dir_name,
+            data_dir_name_lowercase = data_dir_name_lowercase,
+            python_argument = python_argument,
+        )),
+        ShellKind::Posix => Some(format!(
             concat!(
-                "zed() { ",
+                "zed() {{ ",
                 "if [ -n \"$ZED_REMOTE_SERVER_BINARY\" ] && [ -n \"$ZED_REMOTE_SERVER_IDENTIFIER\" ] && command \"$HOME/$ZED_REMOTE_SERVER_BINARY\" open --help >/dev/null 2>&1; then ",
                 "command \"$HOME/$ZED_REMOTE_SERVER_BINARY\" open --identifier \"$ZED_REMOTE_SERVER_IDENTIFIER\" \"$@\"; ",
                 "else ",
-                "zed_cli=''; ",
-                "old_ifs=$IFS; ",
-                "IFS=:; ",
-                "for dir in $PATH; do ",
-                "[ -n \"$dir\" ] || dir=.; ",
-                "candidate=$dir/zed; ",
-                "if [ -x \"$candidate\" ] && [ ! -d \"$candidate\" ] && \"$candidate\" --version 2>/dev/null | grep -q '^Zed '; then ",
-                "zed_cli=$candidate; ",
-                "break; ",
+                "if [ -z \"$ZED_REMOTE_SERVER_IDENTIFIER\" ]; then ",
+                "printf '%s\\n' 'zed: this terminal is missing the remote server identifier.' >&2; ",
+                "return 127; ",
                 "fi; ",
-                "done; ",
-                "IFS=$old_ifs; ",
-                "if [ -n \"$zed_cli\" ]; then ",
-                "command \"$zed_cli\" \"$@\"; ",
+                "if [ \"$(uname)\" = Darwin ]; then ",
+                "zed_data_dir=\"$HOME/Library/Application Support/{data_dir_name}\"; ",
+                "elif [ -n \"$FLATPAK_XDG_DATA_HOME\" ]; then ",
+                "zed_data_dir=\"$FLATPAK_XDG_DATA_HOME/{data_dir_name_lowercase}\"; ",
+                "elif [ -n \"$XDG_DATA_HOME\" ]; then ",
+                "zed_data_dir=\"$XDG_DATA_HOME/{data_dir_name_lowercase}\"; ",
                 "else ",
-                "printf '%s\\n' 'zed: this remote server does not support opening paths from the terminal, and no Zed CLI was found on PATH.' >&2; ",
+                "zed_data_dir=\"$HOME/.local/share/{data_dir_name_lowercase}\"; ",
+                "fi; ",
+                "if command -v python3 >/dev/null 2>&1; then ",
+                "ZED_REMOTE_SERVER_STDIN_SOCKET=\"$zed_data_dir/server_state/$ZED_REMOTE_SERVER_IDENTIFIER/stdin.sock\" command python3 -c {python_argument} \"$@\"; ",
+                "else ",
+                "printf '%s\\n' 'zed: this remote server does not support opening paths from the terminal, and python3 was not found for the socket fallback.' >&2; ",
                 "return 127; ",
                 "fi; ",
                 "fi; ",
-                "}"
-            )
-            .to_string(),
-        ),
+                "}}"
+            ),
+            data_dir_name = data_dir_name,
+            data_dir_name_lowercase = data_dir_name_lowercase,
+            python_argument = python_argument,
+        )),
         ShellKind::Cmd
         | ShellKind::PowerShell
         | ShellKind::Pwsh
@@ -912,6 +956,21 @@ fn remote_cli_activation_script(shell_kind: ShellKind) -> Option<String> {
         | ShellKind::Xonsh
         | ShellKind::Elvish => None,
     }
+}
+
+fn python_exec_argument(source: &str) -> String {
+    let mut argument = String::from("'exec(\"");
+    for character in source.chars() {
+        match character {
+            '\\' => argument.push_str("\\\\"),
+            '"' => argument.push_str("\\\""),
+            '\n' => argument.push_str("\\n"),
+            '\r' => argument.push_str("\\r"),
+            character => argument.push(character),
+        }
+    }
+    argument.push_str("\")'");
+    argument
 }
 
 fn ssh_remote_url(connection_options: &remote::RemoteConnectionOptions) -> Result<Option<String>> {
@@ -1080,5 +1139,20 @@ mod tests {
             format_task_for_activation(&task, ShellKind::PowerShell, "powershell.exe", true),
             "&cargo test 'some test'"
         );
+    }
+
+    #[test]
+    fn remote_cli_activation_scripts_install_socket_fallback() {
+        let fish_script =
+            remote_cli_activation_script(ShellKind::Fish).expect("fish activation script");
+        let posix_script =
+            remote_cli_activation_script(ShellKind::Posix).expect("posix activation script");
+
+        for script in [fish_script, posix_script] {
+            assert!(!script.contains('\n'));
+            assert!(script.contains("ZED_REMOTE_SERVER_STDIN_SOCKET"));
+            assert!(script.contains("python3 -c 'exec("));
+            assert!(!script.contains("command zed "));
+        }
     }
 }
