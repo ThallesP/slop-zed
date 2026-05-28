@@ -845,12 +845,15 @@ fn create_remote_shell(
 
 fn remote_cli_activation_script(shell_kind: ShellKind) -> Option<String> {
     match shell_kind {
+        // `ZED_REMOTE_SERVER_BINARY` is a relative path (`.zed_server/...`) anchored at the
+        // remote `$HOME`, so the activation script must resolve it via `$HOME` to work from
+        // any cwd.
         ShellKind::Fish => Some(
-            "function zed; command \"$ZED_REMOTE_SERVER_BINARY\" open --identifier \"$ZED_REMOTE_SERVER_IDENTIFIER\" $argv; end"
+            "function zed; command \"$HOME/$ZED_REMOTE_SERVER_BINARY\" open --identifier \"$ZED_REMOTE_SERVER_IDENTIFIER\" $argv; end"
                 .to_string(),
         ),
         ShellKind::Posix => Some(
-            "zed() { command \"$ZED_REMOTE_SERVER_BINARY\" open --identifier \"$ZED_REMOTE_SERVER_IDENTIFIER\" \"$@\"; }"
+            "zed() { command \"$HOME/$ZED_REMOTE_SERVER_BINARY\" open --identifier \"$ZED_REMOTE_SERVER_IDENTIFIER\" \"$@\"; }"
                 .to_string(),
         ),
         ShellKind::Cmd
