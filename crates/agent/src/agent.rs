@@ -4,6 +4,7 @@ mod legacy_thread;
 mod native_agent_server;
 pub mod outline;
 mod pattern_extraction;
+mod sandboxing;
 mod templates;
 #[cfg(test)]
 mod tests;
@@ -11,7 +12,6 @@ mod thread;
 mod thread_store;
 mod tool_permissions;
 mod tools;
-mod user_agents_md;
 
 pub use codex_agent_server::{CODEX_AGENT_ID, CodexAgentServer};
 use context_server::ContextServerId;
@@ -25,7 +25,6 @@ pub use thread::*;
 pub use thread_store::*;
 pub use tool_permissions::*;
 pub use tools::*;
-pub use user_agents_md::{UserAgentsMd, UserAgentsMdState, init as init_user_agents_md};
 
 use acp_thread::{
     AcpThread, AgentModelSelector, AgentSessionInfo, AgentSessionList, AgentSessionListRequest,
@@ -53,10 +52,7 @@ use language_model::{IconOrSvg, LanguageModel, LanguageModelProvider, LanguageMo
 use project::{
     AgentId, Project, ProjectItem, ProjectPath, Worktree, trusted_worktrees::TrustedWorktrees,
 };
-use prompt_store::{
-    ProjectContext, PromptStore, RULES_FILE_NAMES, RulesFileContext, UserRulesContext,
-    WorktreeContext,
-};
+use prompt_store::{ProjectContext, RULES_FILE_NAMES, RulesFileContext, WorktreeContext};
 use serde::{Deserialize, Serialize};
 use settings::{LanguageModelSelection, Settings as _, update_settings_file};
 use std::any::Any;
@@ -310,7 +306,6 @@ pub struct NativeAgent {
     templates: Arc<Templates>,
     /// Cached model information
     models: LanguageModels,
-    prompt_store: Option<Entity<PromptStore>>,
     fs: Arc<dyn Fs>,
     _subscriptions: Vec<Subscription>,
     /// Tracks the lifecycle of global skills directory observation. We
@@ -357,20 +352,16 @@ impl NativeAgent {
     pub fn new(
         thread_store: Entity<ThreadStore>,
         templates: Arc<Templates>,
-        prompt_store: Option<Entity<PromptStore>>,
         fs: Arc<dyn Fs>,
         cx: &mut App,
     ) -> Entity<NativeAgent> {
         log::debug!("Creating new NativeAgent");
 
         cx.new(|cx| {
-            let mut subscriptions = vec![cx.subscribe(
+            let subscriptions = vec![cx.subscribe(
                 &LanguageModelRegistry::global(cx),
                 Self::handle_models_updated_event,
             )];
-            if let Some(prompt_store) = prompt_store.as_ref() {
-                subscriptions.push(cx.subscribe(prompt_store, Self::handle_prompts_updated_event))
-            }
 
             if !cx.has_global::<SkillIndex>() {
                 cx.set_global(SkillIndex::default());
@@ -383,7 +374,6 @@ impl NativeAgent {
                 projects: HashMap::default(),
                 templates,
                 models: LanguageModels::new(cx),
-                prompt_store,
                 fs,
                 _subscriptions: subscriptions,
                 skills_state: SkillsState::default(),
@@ -642,7 +632,7 @@ impl NativeAgent {
             return project_id;
         }
 
-        let project_context = cx.new(|_| ProjectContext::new(vec![], vec![]));
+        let project_context = cx.new(|_| ProjectContext::new(vec![]));
         self.register_project_with_initial_context(project.clone(), project_context, cx);
         if let Some(state) = self.projects.get_mut(&project_id) {
             state.project_context_needs_refresh.send(()).ok();
@@ -735,7 +725,6 @@ impl NativeAgent {
                     .context("project state not found")?;
                 anyhow::Ok(Self::build_project_context(
                     &state.project,
-                    this.prompt_store.as_ref(),
                     this.fs.clone(),
                     cx,
                 ))
@@ -807,7 +796,6 @@ impl NativeAgent {
 
     fn build_project_context(
         project: &Entity<Project>,
-        prompt_store: Option<&Entity<PromptStore>>,
         fs: Arc<dyn Fs>,
         cx: &mut App,
     ) -> Task<(ProjectContext, Vec<Skill>, Vec<SkillLoadError>)> {
@@ -889,22 +877,8 @@ impl NativeAgent {
                 .collect();
             cx.background_spawn(async move { future::join_all(project_skills_futures).await })
         };
-        let default_user_rules_task = if let Some(prompt_store) = prompt_store.as_ref() {
-            prompt_store.read_with(cx, |prompt_store, cx| {
-                let prompts = prompt_store.default_prompt_metadata();
-                let load_tasks = prompts.into_iter().map(|prompt_metadata| {
-                    let contents = prompt_store.load(prompt_metadata.id, cx);
-                    async move { (contents.await, prompt_metadata) }
-                });
-                cx.background_spawn(future::join_all(load_tasks))
-            })
-        } else {
-            Task::ready(vec![])
-        };
-
         cx.spawn(async move |_cx| {
-            let (worktrees, default_user_rules) =
-                future::join(future::join_all(worktree_tasks), default_user_rules_task).await;
+            let worktrees = future::join_all(worktree_tasks).await;
 
             let worktrees = worktrees
                 .into_iter()
@@ -914,27 +888,6 @@ impl NativeAgent {
                     //     this.update(cx, |_, cx| cx.emit(rules_error)).ok();
                     // }
                     worktree
-                })
-                .collect::<Vec<_>>();
-
-            let default_user_rules = default_user_rules
-                .into_iter()
-                .flat_map(|(contents, prompt_metadata)| match contents {
-                    Ok(contents) => Some(UserRulesContext {
-                        uuid: prompt_metadata.id.as_user()?,
-                        title: prompt_metadata.title.map(|title| title.to_string()),
-                        contents,
-                    }),
-                    Err(_err) => {
-                        // TODO: show error message
-                        // this.update(cx, |_, cx| {
-                        //     cx.emit(RulesLoadingError {
-                        //         message: format!("{err:?}").into(),
-                        //     });
-                        // })
-                        // .ok();
-                        None
-                    }
                 })
                 .collect::<Vec<_>>();
 
@@ -961,8 +914,7 @@ impl NativeAgent {
             let (catalog_skills, budget_errors) = select_catalog_skills(&overridden);
             skill_errors.extend(budget_errors);
 
-            let project_context =
-                ProjectContext::new(worktrees, default_user_rules).with_skills(catalog_skills);
+            let project_context = ProjectContext::new(worktrees).with_skills(catalog_skills);
             (project_context, skills, skill_errors)
         })
     }
@@ -1120,17 +1072,6 @@ impl NativeAgent {
                 }
             }
             _ => {}
-        }
-    }
-
-    fn handle_prompts_updated_event(
-        &mut self,
-        _prompt_store: Entity<PromptStore>,
-        _event: &prompt_store::PromptsUpdatedEvent,
-        _cx: &mut Context<Self>,
-    ) {
-        for state in self.projects.values_mut() {
-            state.project_context_needs_refresh.send(()).ok();
         }
     }
 
@@ -1846,10 +1787,10 @@ impl NativeAgentConnection {
                         match event {
                             ThreadEvent::UserMessage(message) => {
                                 acp_thread.update(cx, |thread, cx| {
-                                    for content in message.content {
+                                    for content in &*message.content {
                                         thread.push_user_content_block(
                                             Some(message.id.clone()),
-                                            content.into(),
+                                            content.clone().into(),
                                             cx,
                                         );
                                     }
@@ -2671,12 +2612,54 @@ impl ThreadEnvironment for NativeThreadEnvironment {
     fn create_terminal(
         &self,
         command: String,
+        extra_env: Vec<acp::EnvVariable>,
         cwd: Option<PathBuf>,
         output_byte_limit: Option<u64>,
+        sandbox_wrap: Option<acp_thread::SandboxWrap>,
         cx: &mut AsyncApp,
     ) -> Task<Result<Rc<dyn TerminalHandle>>> {
+        // Use a per-thread temp directory for all terminal commands, even when
+        // sandboxing is disabled, so the model can't infer sandbox state from
+        // `$TMPDIR` changing between conversations.
+        let mut extra_env = extra_env;
+        let mut sandbox_wrap = sandbox_wrap;
+        match self
+            .thread
+            .update(cx, |thread, cx| thread.sandboxed_terminal_temp_dir(cx))
+        {
+            Ok(Ok(temp_dir)) => {
+                // Canonicalize so the path matches what the sandbox resolves
+                // symlinks to (e.g. `/var` -> `/private/var` on macOS).
+                // `$TMPDIR` and the writable-scope entry below must agree, and
+                // they must agree with the path the kernel actually checks.
+                let temp_dir = temp_dir.canonicalize().unwrap_or(temp_dir);
+                let temp_dir_string = temp_dir.to_string_lossy().into_owned();
+                extra_env.extend([
+                    acp::EnvVariable::new("TMPDIR", &temp_dir_string),
+                    acp::EnvVariable::new("TMP", &temp_dir_string),
+                    acp::EnvVariable::new("TEMP", &temp_dir_string),
+                ]);
+                // The command's `$TMPDIR` must live inside the sandbox's
+                // writable scope. The per-thread temp directory is owned here
+                // (not in the terminal tool that assembles the rest of the
+                // writable set), so add it whenever the command is sandboxed.
+                if let Some(sandbox_wrap) = &mut sandbox_wrap {
+                    sandbox_wrap.writable_paths.push(temp_dir);
+                }
+            }
+            Ok(Err(error)) => return Task::ready(Err(error)),
+            Err(error) => return Task::ready(Err(error)),
+        };
         let task = self.acp_thread.update(cx, |thread, cx| {
-            thread.create_terminal(command, vec![], vec![], cwd, output_byte_limit, cx)
+            thread.create_terminal(
+                command,
+                vec![],
+                extra_env,
+                cwd,
+                output_byte_limit,
+                sandbox_wrap,
+                cx,
+            )
         });
 
         let acp_thread = self.acp_thread.clone();
@@ -3503,7 +3486,7 @@ mod internal_tests {
         let project = Project::test(fs.clone(), [], cx).await;
         let thread_store = cx.new(|cx| ThreadStore::new(cx));
         let agent =
-            cx.update(|cx| NativeAgent::new(thread_store, Templates::new(), None, fs.clone(), cx));
+            cx.update(|cx| NativeAgent::new(thread_store, Templates::new(), fs.clone(), cx));
 
         // Creating a session registers the project and triggers context building.
         let connection = NativeAgentConnection(agent.clone());
@@ -3594,7 +3577,7 @@ mod internal_tests {
         let project = Project::test(fs.clone(), [], cx).await;
         let thread_store = cx.new(|cx| ThreadStore::new(cx));
         let agent =
-            cx.update(|cx| NativeAgent::new(thread_store, Templates::new(), None, fs.clone(), cx));
+            cx.update(|cx| NativeAgent::new(thread_store, Templates::new(), fs.clone(), cx));
 
         // Simulate the user-interaction trigger that the agent panel
         // fires (input focus, slash autocomplete, or submit). In tests
@@ -3657,7 +3640,7 @@ mod internal_tests {
         let project = Project::test(fs.clone(), [], cx).await;
         let thread_store = cx.new(|cx| ThreadStore::new(cx));
         let agent =
-            cx.update(|cx| NativeAgent::new(thread_store, Templates::new(), None, fs.clone(), cx));
+            cx.update(|cx| NativeAgent::new(thread_store, Templates::new(), fs.clone(), cx));
 
         // First scan trigger: nothing on disk yet, state stays idle.
         cx.update(|cx| {
@@ -3734,7 +3717,7 @@ mod internal_tests {
         let project = Project::test(fs.clone(), [], cx).await;
         let thread_store = cx.new(|cx| ThreadStore::new(cx));
         let agent =
-            cx.update(|cx| NativeAgent::new(thread_store, Templates::new(), None, fs.clone(), cx));
+            cx.update(|cx| NativeAgent::new(thread_store, Templates::new(), fs.clone(), cx));
 
         // First scan trigger: nothing on disk yet.
         cx.update(|cx| {
@@ -3880,7 +3863,7 @@ mod internal_tests {
         let project = Project::test(fs.clone(), [], cx).await;
         let thread_store = cx.new(|cx| ThreadStore::new(cx));
         let agent =
-            cx.update(|cx| NativeAgent::new(thread_store, Templates::new(), None, fs.clone(), cx));
+            cx.update(|cx| NativeAgent::new(thread_store, Templates::new(), fs.clone(), cx));
 
         // Open a parent session through the connection, the same way
         // production does. This triggers project-context refresh which
@@ -3993,7 +3976,7 @@ mod internal_tests {
         let project = Project::test(fs.clone(), [], cx).await;
         let thread_store = cx.new(|cx| ThreadStore::new(cx));
         let agent =
-            cx.update(|cx| NativeAgent::new(thread_store, Templates::new(), None, fs.clone(), cx));
+            cx.update(|cx| NativeAgent::new(thread_store, Templates::new(), fs.clone(), cx));
 
         let connection = NativeAgentConnection(agent.clone());
         let acp_thread = cx
@@ -4098,7 +4081,7 @@ mod internal_tests {
             Project::test_with_worktree_trust(fs.clone(), [Path::new("/project")], cx).await;
         let thread_store = cx.new(|cx| ThreadStore::new(cx));
         let agent =
-            cx.update(|cx| NativeAgent::new(thread_store, Templates::new(), None, fs.clone(), cx));
+            cx.update(|cx| NativeAgent::new(thread_store, Templates::new(), fs.clone(), cx));
 
         let connection = NativeAgentConnection(agent.clone());
         let acp_thread = cx
@@ -4179,10 +4162,9 @@ mod internal_tests {
         fs.insert_tree("/", json!({ "a": {}  })).await;
         let project = Project::test(fs.clone(), [], cx).await;
         let thread_store = cx.new(|cx| ThreadStore::new(cx));
-        let connection =
-            NativeAgentConnection(cx.update(|cx| {
-                NativeAgent::new(thread_store, Templates::new(), None, fs.clone(), cx)
-            }));
+        let connection = NativeAgentConnection(
+            cx.update(|cx| NativeAgent::new(thread_store, Templates::new(), fs.clone(), cx)),
+        );
 
         // Create a thread/session
         let acp_thread = cx
@@ -4256,7 +4238,7 @@ mod internal_tests {
 
         // Create the agent and connection
         let agent =
-            cx.update(|cx| NativeAgent::new(thread_store, Templates::new(), None, fs.clone(), cx));
+            cx.update(|cx| NativeAgent::new(thread_store, Templates::new(), fs.clone(), cx));
         let connection = NativeAgentConnection(agent.clone());
 
         // Create a thread/session
@@ -4353,7 +4335,7 @@ mod internal_tests {
 
         let thread_store = cx.new(|cx| ThreadStore::new(cx));
         let agent =
-            cx.update(|cx| NativeAgent::new(thread_store, Templates::new(), None, fs.clone(), cx));
+            cx.update(|cx| NativeAgent::new(thread_store, Templates::new(), fs.clone(), cx));
         let connection = NativeAgentConnection(agent.clone());
 
         let acp_thread = cx
@@ -4444,7 +4426,7 @@ mod internal_tests {
 
         let thread_store = cx.new(|cx| ThreadStore::new(cx));
         let agent =
-            cx.update(|cx| NativeAgent::new(thread_store, Templates::new(), None, fs.clone(), cx));
+            cx.update(|cx| NativeAgent::new(thread_store, Templates::new(), fs.clone(), cx));
         let connection = Rc::new(NativeAgentConnection(agent.clone()));
 
         let acp_thread = cx
@@ -4495,9 +4477,8 @@ mod internal_tests {
         fs.insert_tree("/", json!({ "a": {} })).await;
         let project = Project::test(fs.clone(), [path!("/a").as_ref()], cx).await;
         let thread_store = cx.new(|cx| ThreadStore::new(cx));
-        let agent = cx.update(|cx| {
-            NativeAgent::new(thread_store.clone(), Templates::new(), None, fs.clone(), cx)
-        });
+        let agent = cx
+            .update(|cx| NativeAgent::new(thread_store.clone(), Templates::new(), fs.clone(), cx));
         let connection = Rc::new(NativeAgentConnection(agent.clone()));
 
         // Register a thinking model.
@@ -4598,9 +4579,8 @@ mod internal_tests {
         fs.insert_tree("/", json!({ "a": {} })).await;
         let project = Project::test(fs.clone(), [path!("/a").as_ref()], cx).await;
         let thread_store = cx.new(|cx| ThreadStore::new(cx));
-        let agent = cx.update(|cx| {
-            NativeAgent::new(thread_store.clone(), Templates::new(), None, fs.clone(), cx)
-        });
+        let agent = cx
+            .update(|cx| NativeAgent::new(thread_store.clone(), Templates::new(), fs.clone(), cx));
         let connection = Rc::new(NativeAgentConnection(agent.clone()));
 
         // Register a model where id() != name(), like real Anthropic models
@@ -4714,9 +4694,8 @@ mod internal_tests {
         .await;
         let project = Project::test(fs.clone(), [path!("/a").as_ref()], cx).await;
         let thread_store = cx.new(|cx| ThreadStore::new(cx));
-        let agent = cx.update(|cx| {
-            NativeAgent::new(thread_store.clone(), Templates::new(), None, fs.clone(), cx)
-        });
+        let agent = cx
+            .update(|cx| NativeAgent::new(thread_store.clone(), Templates::new(), fs.clone(), cx));
         let connection = Rc::new(NativeAgentConnection(agent.clone()));
 
         let acp_thread = cx
@@ -4896,9 +4875,8 @@ mod internal_tests {
         .await;
         let project = Project::test(fs.clone(), [path!("/a").as_ref()], cx).await;
         let thread_store = cx.new(|cx| ThreadStore::new(cx));
-        let agent = cx.update(|cx| {
-            NativeAgent::new(thread_store.clone(), Templates::new(), None, fs.clone(), cx)
-        });
+        let agent = cx
+            .update(|cx| NativeAgent::new(thread_store.clone(), Templates::new(), fs.clone(), cx));
         let connection = Rc::new(NativeAgentConnection(agent.clone()));
 
         let acp_thread = cx
@@ -4977,9 +4955,8 @@ mod internal_tests {
         .await;
         let project = Project::test(fs.clone(), [path!("/a").as_ref()], cx).await;
         let thread_store = cx.new(|cx| ThreadStore::new(cx));
-        let agent = cx.update(|cx| {
-            NativeAgent::new(thread_store.clone(), Templates::new(), None, fs.clone(), cx)
-        });
+        let agent = cx
+            .update(|cx| NativeAgent::new(thread_store.clone(), Templates::new(), fs.clone(), cx));
         let connection = Rc::new(NativeAgentConnection(agent.clone()));
 
         let acp_thread = cx
@@ -5061,9 +5038,8 @@ mod internal_tests {
         .await;
         let project = Project::test(fs.clone(), [path!("/a").as_ref()], cx).await;
         let thread_store = cx.new(|cx| ThreadStore::new(cx));
-        let agent = cx.update(|cx| {
-            NativeAgent::new(thread_store.clone(), Templates::new(), None, fs.clone(), cx)
-        });
+        let agent = cx
+            .update(|cx| NativeAgent::new(thread_store.clone(), Templates::new(), fs.clone(), cx));
         let connection = Rc::new(NativeAgentConnection(agent.clone()));
 
         let acp_thread = cx
@@ -5206,9 +5182,8 @@ mod internal_tests {
         fs.insert_tree("/", json!({ "a": {} })).await;
         let project = Project::test(fs.clone(), [], cx).await;
         let thread_store = cx.new(|cx| ThreadStore::new(cx));
-        let agent = cx.update(|cx| {
-            NativeAgent::new(thread_store.clone(), Templates::new(), None, fs.clone(), cx)
-        });
+        let agent = cx
+            .update(|cx| NativeAgent::new(thread_store.clone(), Templates::new(), fs.clone(), cx));
         let connection = Rc::new(NativeAgentConnection(agent.clone()));
 
         let acp_thread = cx

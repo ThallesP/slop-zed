@@ -34,8 +34,8 @@ use gpui::{
     FocusHandle, Focusable, FontStyle, FontWeight, GlobalElementId, Hitbox, Hsla, Image,
     ImageFormat, ImageSource, KeyContext, Length, MouseButton, MouseDownEvent, MouseEvent,
     MouseMoveEvent, MouseUpEvent, Point, ScrollHandle, Stateful, StrikethroughStyle,
-    StyleRefinement, StyledImage, StyledText, Task, TextAlign, TextLayout, TextRun, TextStyle,
-    TextStyleRefinement, actions, img, point, quad,
+    StyleRefinement, StyledImage, StyledText, Subscription, Task, TextAlign, TextLayout, TextRun,
+    TextStyle, TextStyleRefinement, actions, img, point, quad,
 };
 use language::{CharClassifier, Language, LanguageRegistry, Rope};
 use parser::CodeBlockMetadata;
@@ -333,6 +333,7 @@ pub struct Markdown {
     fallback_code_block_language: Option<LanguageName>,
     options: MarkdownOptions,
     mermaid_state: MermaidState,
+    _mermaid_theme_subscription: Option<Subscription>,
     mermaid_showing_code: HashSet<usize>,
     copied_code_blocks: HashSet<ElementId>,
     wrapped_code_blocks: HashSet<usize>,
@@ -497,6 +498,16 @@ impl Markdown {
         cx: &mut Context<Self>,
     ) -> Self {
         let focus_handle = cx.focus_handle();
+
+        let theme_subscription = if options.render_mermaid_diagrams {
+            Some(
+                cx.observe_global::<theme::GlobalTheme>(|this: &mut Self, cx| {
+                    this.invalidate_mermaid_cache(cx);
+                }),
+            )
+        } else {
+            None
+        };
         let mut this = Self {
             source,
             selection: Selection::default(),
@@ -513,6 +524,7 @@ impl Markdown {
             fallback_code_block_language,
             options,
             mermaid_state: MermaidState::default(),
+            _mermaid_theme_subscription: theme_subscription,
             mermaid_showing_code: HashSet::default(),
             copied_code_blocks: HashSet::default(),
             wrapped_code_blocks: HashSet::default(),
@@ -561,15 +573,15 @@ impl Markdown {
             .retain(|id, _| ids.contains(id));
     }
 
-    /// Used in the agent panel to force a re-render when the theme changes
     pub fn invalidate_mermaid_cache(&mut self, cx: &mut Context<Self>) {
-        if self.options.render_mermaid_diagrams && !self.parsed_markdown.mermaid_diagrams.is_empty()
+        if !self.options.render_mermaid_diagrams || self.parsed_markdown.mermaid_diagrams.is_empty()
         {
-            self.mermaid_state.clear();
-            let parsed_markdown = self.parsed_markdown.clone();
-            self.mermaid_state.update(&parsed_markdown, cx);
-            cx.notify();
+            return;
         }
+
+        self.mermaid_state.clear();
+        self.mermaid_state.update(&self.parsed_markdown, cx);
+        cx.notify();
     }
 
     pub(crate) fn is_mermaid_showing_code(&self, source_offset: usize) -> bool {
@@ -1556,18 +1568,28 @@ impl MarkdownElement {
                                     return;
                                 }
                             }
-                            let (range, mode) = match event.click_count {
+                            let (range, mode, reversed) = match event.click_count {
+                                1 if event.modifiers.shift => {
+                                    let tail = markdown.selection.tail();
+                                    let reversed = source_index < tail;
+                                    let range = if reversed {
+                                        source_index..tail
+                                    } else {
+                                        tail..source_index
+                                    };
+                                    (range, SelectMode::Character, reversed)
+                                }
                                 1 => {
                                     let range = source_index..source_index;
-                                    (range, SelectMode::Character)
+                                    (range, SelectMode::Character, false)
                                 }
                                 2 => {
                                     let range = rendered_text.surrounding_word_range(source_index);
-                                    (range.clone(), SelectMode::Word(range))
+                                    (range.clone(), SelectMode::Word(range), false)
                                 }
                                 3 => {
                                     let range = rendered_text.surrounding_line_range(source_index);
-                                    (range.clone(), SelectMode::Line(range))
+                                    (range.clone(), SelectMode::Line(range), false)
                                 }
                                 _ => {
                                     let range = 0..rendered_text
@@ -1575,13 +1597,13 @@ impl MarkdownElement {
                                         .last()
                                         .map(|line| line.source_end)
                                         .unwrap_or(0);
-                                    (range, SelectMode::All)
+                                    (range, SelectMode::All, false)
                                 }
                             };
                             markdown.selection = Selection {
                                 start: range.start,
                                 end: range.end,
-                                reversed: false,
+                                reversed,
                                 pending: true,
                                 mode,
                             };
