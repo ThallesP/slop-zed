@@ -195,20 +195,15 @@ impl WslRemoteConnection {
                 .map_err(|e| anyhow!("Failed to create directory: {}", e))?;
         }
 
-        let binary_is_compatible_on_server = self
-            .run_wsl_command(&dst_path.display(PathStyle::Posix), &["version"])
-            .await
-            .is_ok()
-            && self
-                .run_wsl_command(&dst_path.display(PathStyle::Posix), &["open", "--help"])
-                .await
-                .is_ok();
+        let binary_is_compatible_on_server =
+            self.remote_server_binary_is_compatible(&dst_path).await;
 
         #[cfg(any(debug_assertions, feature = "build-remote-server-binary"))]
         if let Some(remote_server_path) = super::build_remote_server_from_source(
             &self.platform,
             delegate.as_ref(),
             binary_is_compatible_on_server,
+            false,
             cx,
         )
         .await?
@@ -224,6 +219,8 @@ impl WslRemoteConnection {
             self.upload_file(&remote_server_path, &tmp_path, delegate, cx)
                 .await?;
             self.extract_and_install(&tmp_path, &dst_path, delegate, cx)
+                .await?;
+            self.ensure_remote_server_binary_is_compatible(&dst_path)
                 .await?;
             return Ok(dst_path);
         }
@@ -251,8 +248,60 @@ impl WslRemoteConnection {
         self.upload_file(&src_path, &tmp_path, delegate, cx).await?;
         self.extract_and_install(&tmp_path, &dst_path, delegate, cx)
             .await?;
+        if self.remote_server_binary_is_compatible(&dst_path).await {
+            return Ok(dst_path);
+        }
+
+        log::warn!(
+            "downloaded WSL remote server binary does not support `open`; building remote server from source"
+        );
+        #[cfg(any(debug_assertions, feature = "build-remote-server-binary"))]
+        if let Some(remote_server_path) = super::build_remote_server_from_source(
+            &self.platform,
+            delegate.as_ref(),
+            false,
+            true,
+            cx,
+        )
+        .await?
+        {
+            let file_name = remote_server_path
+                .file_name()
+                .context("remote server binary path has no file name")?
+                .to_string_lossy();
+            let tmp_path = paths::remote_server_dir_relative().join(RelPath::unix(&format!(
+                "download-{}-{file_name}",
+                std::process::id()
+            ))?);
+            self.upload_file(&remote_server_path, &tmp_path, delegate, cx)
+                .await?;
+            self.extract_and_install(&tmp_path, &dst_path, delegate, cx)
+                .await?;
+        }
+
+        self.ensure_remote_server_binary_is_compatible(&dst_path)
+            .await?;
 
         Ok(dst_path)
+    }
+
+    async fn remote_server_binary_is_compatible(&self, dst_path: &RelPath) -> bool {
+        self.ensure_remote_server_binary_is_compatible(dst_path)
+            .await
+            .is_ok()
+    }
+
+    async fn ensure_remote_server_binary_is_compatible(&self, dst_path: &RelPath) -> Result<()> {
+        let binary_path = dst_path.display(PathStyle::Posix).into_owned();
+        self.run_wsl_command(&binary_path, &["version"])
+            .await
+            .with_context(|| format!("checking remote server binary version at {binary_path}"))?;
+        self.run_wsl_command(&binary_path, &["open", "--help"])
+            .await
+            .with_context(|| {
+                format!("remote server binary at {binary_path} does not support `open`")
+            })?;
+        Ok(())
     }
 
     async fn upload_file(

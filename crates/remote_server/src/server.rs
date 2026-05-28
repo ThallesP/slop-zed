@@ -81,6 +81,7 @@ pub enum Commands {
         #[arg(long)]
         identifier: String,
     },
+    #[command(name = "open")]
     Open {
         #[arg(long)]
         identifier: String,

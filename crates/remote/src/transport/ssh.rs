@@ -812,32 +812,15 @@ impl SshRemoteConnection {
         let dst_path =
             paths::remote_server_dir_relative().join(RelPath::unix(&binary_name).unwrap());
 
-        let binary_is_compatible_on_server = self
-            .socket
-            .run_command(
-                self.ssh_shell_kind,
-                &dst_path.display(self.path_style()),
-                &["version"],
-                true,
-            )
-            .await
-            .is_ok()
-            && self
-                .socket
-                .run_command(
-                    self.ssh_shell_kind,
-                    &dst_path.display(self.path_style()),
-                    &["open", "--help"],
-                    true,
-                )
-                .await
-                .is_ok();
+        let binary_is_compatible_on_server =
+            self.remote_server_binary_is_compatible(&dst_path).await;
 
         #[cfg(any(debug_assertions, feature = "build-remote-server-binary"))]
         if let Some(remote_server_path) = super::build_remote_server_from_source(
             &self.ssh_platform,
             delegate.as_ref(),
             binary_is_compatible_on_server,
+            false,
             cx,
         )
         .await?
@@ -853,6 +836,8 @@ impl SshRemoteConnection {
             self.upload_local_server_binary(&remote_server_path, &tmp_path, delegate, cx)
                 .await?;
             self.extract_server_binary(&dst_path, &tmp_path, delegate, cx)
+                .await?;
+            self.ensure_remote_server_binary_is_compatible(&dst_path)
                 .await?;
             return Ok(dst_path);
         }
@@ -897,7 +882,12 @@ impl SshRemoteConnection {
                     self.extract_server_binary(&dst_path, &tmp_path_compressed, delegate, cx)
                         .await
                         .context("extracting server binary")?;
-                    return Ok(dst_path);
+                    if self.remote_server_binary_is_compatible(&dst_path).await {
+                        return Ok(dst_path);
+                    }
+                    log::warn!(
+                        "remote-downloaded server binary does not support `open`; trying another install method"
+                    );
                 }
                 Err(e) => {
                     log::error!(
@@ -922,7 +912,61 @@ impl SshRemoteConnection {
         self.extract_server_binary(&dst_path, &tmp_path_compressed, delegate, cx)
             .await
             .context("extracting server binary")?;
+        if self.remote_server_binary_is_compatible(&dst_path).await {
+            return Ok(dst_path);
+        }
+
+        log::warn!(
+            "downloaded remote server binary does not support `open`; building remote server from source"
+        );
+        #[cfg(any(debug_assertions, feature = "build-remote-server-binary"))]
+        if let Some(remote_server_path) = super::build_remote_server_from_source(
+            &self.ssh_platform,
+            delegate.as_ref(),
+            false,
+            true,
+            cx,
+        )
+        .await?
+        {
+            let file_name = remote_server_path
+                .file_name()
+                .context("remote server binary path has no file name")?
+                .to_string_lossy();
+            let tmp_path = paths::remote_server_dir_relative().join(RelPath::unix(&format!(
+                "download-{}-{file_name}",
+                std::process::id()
+            ))?);
+            self.upload_local_server_binary(&remote_server_path, &tmp_path, delegate, cx)
+                .await?;
+            self.extract_server_binary(&dst_path, &tmp_path, delegate, cx)
+                .await?;
+        }
+
+        self.ensure_remote_server_binary_is_compatible(&dst_path)
+            .await?;
         Ok(dst_path)
+    }
+
+    async fn remote_server_binary_is_compatible(&self, dst_path: &RelPath) -> bool {
+        self.ensure_remote_server_binary_is_compatible(dst_path)
+            .await
+            .is_ok()
+    }
+
+    async fn ensure_remote_server_binary_is_compatible(&self, dst_path: &RelPath) -> Result<()> {
+        let binary_path = dst_path.display(self.path_style()).into_owned();
+        self.socket
+            .run_command(self.ssh_shell_kind, &binary_path, &["version"], true)
+            .await
+            .with_context(|| format!("checking remote server binary version at {binary_path}"))?;
+        self.socket
+            .run_command(self.ssh_shell_kind, &binary_path, &["open", "--help"], true)
+            .await
+            .with_context(|| {
+                format!("remote server binary at {binary_path} does not support `open`")
+            })?;
+        Ok(())
     }
 
     async fn download_binary_on_server(

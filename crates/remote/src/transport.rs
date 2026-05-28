@@ -222,6 +222,7 @@ async fn build_remote_server_from_source(
     platform: &crate::RemotePlatform,
     delegate: &dyn crate::RemoteClientDelegate,
     binary_is_compatible_on_server: bool,
+    force_build: bool,
     cx: &mut AsyncApp,
 ) -> Result<Option<std::path::PathBuf>> {
     use std::env::VarError;
@@ -250,6 +251,7 @@ async fn build_remote_server_from_source(
             return Ok(None);
         }
         Ok(value) => value,
+        Err(VarError::NotPresent) if force_build => String::new(),
         Err(VarError::NotPresent) => {
             if !binary_is_compatible_on_server {
                 log::info!(

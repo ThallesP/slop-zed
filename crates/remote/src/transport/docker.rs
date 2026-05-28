@@ -13,7 +13,6 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
-use util::ResultExt;
 use util::command::Stdio;
 use util::shell::ShellKind;
 use util::{
@@ -202,28 +201,14 @@ impl DockerExecConnection {
             paths::remote_server_dir_relative().join(RelPath::unix(&binary_name).unwrap());
 
         let binary_is_compatible_on_server = self
-            .run_docker_exec(
-                &dst_path.display(self.path_style()),
-                Some(&remote_dir_for_server),
-                &Default::default(),
-                &["version"],
-            )
-            .await
-            .is_ok()
-            && self
-                .run_docker_exec(
-                    &dst_path.display(self.path_style()),
-                    Some(&remote_dir_for_server),
-                    &Default::default(),
-                    &["open", "--help"],
-                )
-                .await
-                .is_ok();
+            .remote_server_binary_is_compatible(&dst_path, &remote_dir_for_server)
+            .await;
         #[cfg(any(debug_assertions, feature = "build-remote-server-binary"))]
         if let Some(remote_server_path) = super::build_remote_server_from_source(
             &remote_platform,
             delegate.as_ref(),
             binary_is_compatible_on_server,
+            false,
             cx,
         )
         .await?
@@ -245,6 +230,8 @@ impl DockerExecConnection {
             )
             .await?;
             self.extract_server_binary(&dst_path, &tmp_path, &remote_dir_for_server, delegate, cx)
+                .await?;
+            self.ensure_remote_server_binary_is_compatible(&dst_path, &remote_dir_for_server)
                 .await?;
             return Ok(dst_path);
         }
@@ -285,7 +272,15 @@ impl DockerExecConnection {
                     )
                     .await
                     .context("extracting server binary")?;
-                    return Ok(dst_path);
+                    if self
+                        .remote_server_binary_is_compatible(&dst_path, &remote_dir_for_server)
+                        .await
+                    {
+                        return Ok(dst_path);
+                    }
+                    log::warn!(
+                        "remote-downloaded Docker server binary does not support `open`; trying another install method"
+                    );
                 }
                 Err(e) => {
                     log::error!(
@@ -317,7 +312,86 @@ impl DockerExecConnection {
         )
         .await
         .context("extracting server binary")?;
+        if self
+            .remote_server_binary_is_compatible(&dst_path, &remote_dir_for_server)
+            .await
+        {
+            return Ok(dst_path);
+        }
+
+        log::warn!(
+            "downloaded Docker remote server binary does not support `open`; building remote server from source"
+        );
+        #[cfg(any(debug_assertions, feature = "build-remote-server-binary"))]
+        if let Some(remote_server_path) = super::build_remote_server_from_source(
+            &remote_platform,
+            delegate.as_ref(),
+            false,
+            true,
+            cx,
+        )
+        .await?
+        {
+            let file_name = remote_server_path
+                .file_name()
+                .context("remote server binary path has no file name")?
+                .to_string_lossy();
+            let tmp_path = paths::remote_server_dir_relative().join(RelPath::unix(&format!(
+                "download-{}-{file_name}",
+                std::process::id()
+            ))?);
+            self.upload_local_server_binary(
+                &remote_server_path,
+                &tmp_path,
+                &remote_dir_for_server,
+                delegate,
+                cx,
+            )
+            .await?;
+            self.extract_server_binary(&dst_path, &tmp_path, &remote_dir_for_server, delegate, cx)
+                .await?;
+        }
+
+        self.ensure_remote_server_binary_is_compatible(&dst_path, &remote_dir_for_server)
+            .await?;
         Ok(dst_path)
+    }
+
+    async fn remote_server_binary_is_compatible(
+        &self,
+        dst_path: &RelPath,
+        remote_dir_for_server: &str,
+    ) -> bool {
+        self.ensure_remote_server_binary_is_compatible(dst_path, remote_dir_for_server)
+            .await
+            .is_ok()
+    }
+
+    async fn ensure_remote_server_binary_is_compatible(
+        &self,
+        dst_path: &RelPath,
+        remote_dir_for_server: &str,
+    ) -> Result<()> {
+        let binary_path = dst_path.display(self.path_style()).into_owned();
+        self.run_docker_exec(
+            &binary_path,
+            Some(remote_dir_for_server),
+            &Default::default(),
+            &["version"],
+        )
+        .await
+        .with_context(|| format!("checking remote server binary version at {binary_path}"))?;
+        self.run_docker_exec(
+            &binary_path,
+            Some(remote_dir_for_server),
+            &Default::default(),
+            &["open", "--help"],
+        )
+        .await
+        .with_context(|| {
+            format!("remote server binary at {binary_path} does not support `open`")
+        })?;
+        Ok(())
     }
 
     async fn docker_user_home_dir(&self) -> Result<String> {
@@ -371,8 +445,7 @@ impl DockerExecConnection {
             &Default::default(),
             &args,
         )
-        .await
-        .log_err();
+        .await?;
         Ok(())
     }
 
